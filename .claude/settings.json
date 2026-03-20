@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "Bash(cargo *)": true,
+    "Bash(task *)": true,
+    "Bash(rustup *)": true,
+    "Bash(mise *)": true,
+    "Bash(git status*)": true,
+    "Bash(git log*)": true,
+    "Bash(git diff*)": true,
+    "Bash(git branch*)": true,
+    "Bash(git show*)": true,
+    "Bash(git blame*)": true,
+    "Bash(git stash list*)": true,
+    "Bash(pkg-config *)": true,
+    "Bash(wc *)": true,
+    "Read": true,
+    "Edit": true,
+    "Write": true,
+    "Glob": true,
+    "Grep": true,
+    "Agent": true,
+    "Skill": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/validate-commit-msg.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/post-edit-check.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/security-stop-check.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

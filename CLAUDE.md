@@ -2,12 +2,70 @@
 
 This file is the entrypoint for agents. Keep it current — if you discover something wrong or missing, fix it. Same for `specs/` and `docs/`.
 
+## Principles
+
+This is a security product. Code quality, auditability, and simplicity are not nice-to-haves — they are security properties.
+
+- **Simplicity IS security.** If a reviewer can't follow the logic, it's a bug. Prefer straightforward code over clever abstractions.
+- **Minimal surface area.** Every public API, every dependency, every feature is attack surface. Add only what's needed.
+- **No `.unwrap()` on fallible operations** in non-test code. Use typed errors (`thiserror`), propagate with `?`.
+- **No `unsafe`** without a spec-level justification and a `// SAFETY:` comment.
+- **Secrets are toxic.** Never log them, never put them in error messages, never hold them longer than needed.
+- **Specs before code.** Design changes go through `specs/` before implementation. See Spec Lifecycle below.
+
 ## Maintenance Rules
 
 - **This file**: Update when gotchas change, conventions shift, or you discover undocumented traps. Don't document the obvious — only what would surprise an agent reading the code for the first time.
-- **`specs/`**: ADR-style docs (Status/Context/Decision/Consequences). Major design changes go here *before* implementation. Update existing ADRs when decisions are revised.
-- **`docs/`**: Project knowledge, architecture explanations, onboarding context. Not duplicated from specs.
+- **`specs/`**: ADR-style decision records. Immutable once implemented — see Spec Lifecycle below.
+- **`docs/`**: Living documentation of the current system. Always reflects reality. Update when code changes.
 - **`UPGRADING.md`**: SDK revision tracking and transitive dep pinning. Update on every rev bump.
+
+## Spec Lifecycle
+
+Full process documented in `docs/development.md`. Quick reference:
+
+Specs live in `specs/` as numbered ADR-style documents (`NNN-slug.md`). Every spec has a Status field.
+
+| Status | Meaning | Mutable? |
+|--------|---------|----------|
+| **Proposed** | Under discussion, not yet approved | Yes — freely edit |
+| **Accepted** | Approved for implementation | Yes — refine details |
+| **Implemented** | Code exists matching this spec | **No** — frozen as historical record |
+| **Superseded** | Replaced by a newer spec | **No** — add "Superseded by: NNN" |
+
+**Key rules:**
+- Changing behavior described by an Implemented spec requires a **new spec** that supersedes the old one
+- Every spec must include a **Security Analysis** section with: Threat Model Impact, Attack Vectors (table with severity), Planned Mitigations (table with mechanism), Residual Risk, and Implementation Security Notes (filled during finalization)
+- Use `/spec <description>` to create new specs, `/implement specs/NNN-slug.md` to implement them
+- `docs/` reflects current reality; `specs/` preserves decision history. Don't duplicate between them.
+
+## Commits
+
+Atomic conventional commits. Each commit is one logical change.
+
+- Format: `type(scope): description` — lowercase, imperative mood, no period
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `security`
+- Scopes: crate names (`cli`, `service`, `sdk`, `protocol`, `prompt`, `common`) or feature areas (`ssh`, `auth`, `sync`, `ipc`)
+- Spec-only: `docs(specs): add ADR NNN - title`
+- Breaking changes: `feat(scope)!: description` with body explaining the break
+- Don't mix unrelated changes in one commit. A feature touching multiple crates for one purpose is fine as one commit.
+
+## Feature Development Lifecycle
+
+Full process documented in `docs/development.md`. Quick reference:
+
+New features follow a six-phase lifecycle via `/feature <description>`:
+
+1. **Brainstorm & Threat Analysis** — understand the feature, map security surface, identify attack vectors
+2. **Spec** — write the ADR with Security Analysis section capturing all vectors and planned mitigations
+3. **Implement** — code the spec, pass quality gates (fmt, clippy, tests)
+4. **Test** — add tests targeting the threat analysis, cover every attack vector
+5. **Security Audit** — adversarial review verifying every planned mitigation is actually implemented
+6. **Finalize** — fill in spec's Implementation Security Notes, update spec status + docs, commit
+
+Each phase pauses for user review. The audit in Phase 5 checks that every attack vector from Phase 1 has a working mitigation. Critical/High findings loop back to Phase 3. The spec's Security Analysis section evolves: Planned Mitigations are written in Phase 2, Implementation Security Notes are filled in Phase 6.
+
+Individual phases are also available standalone: `/spec`, `/implement`, `/fix`, `/refactor`, `/test`, `/security-review`, `/audit`, `/sync-docs`, `/check`, `/upgrade-sdk`.
 
 ## Build
 
