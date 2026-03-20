@@ -65,7 +65,9 @@ New features follow a six-phase lifecycle via `/feature <description>`:
 
 Each phase pauses for user review. The audit in Phase 5 checks that every attack vector from Phase 1 has a working mitigation. Critical/High findings loop back to Phase 3. The spec's Security Analysis section evolves: Planned Mitigations are written in Phase 2, Implementation Security Notes are filled in Phase 6.
 
-Individual phases are also available standalone: `/spec`, `/implement`, `/fix`, `/refactor`, `/test`, `/security-review`, `/audit`, `/sync-docs`, `/check`, `/upgrade-sdk`.
+Bug fixes follow a lighter three-phase workflow via `/fix <description>`: Diagnose (root cause + security triage) → Fix & Test (minimal fix + regression test) → Verify & Commit. Security bugs get extra scrutiny: similar-pattern search, threat model update, and `security(scope):` commit type.
+
+Individual phases are also available standalone: `/spec`, `/implement`, `/refactor`, `/test`, `/security-review`, `/audit`, `/sync-docs`, `/check`, `/upgrade-sdk`.
 
 ## Build
 

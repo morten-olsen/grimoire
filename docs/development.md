@@ -271,18 +271,57 @@ specs/              docs/                 CLAUDE.md
 - **CLAUDE.md** answers "what will surprise me?" — gotchas, traps, non-obvious conventions.
 - Don't duplicate. A doc may say "access approval is scoped to session leader PID" without repeating the full rationale from ADR 008.
 
-## Bug Fixes and Small Changes
+## Bug Fix Workflow
 
-Not everything needs the full lifecycle. Use judgment:
+Bug fixes use `/fix <description>` — a three-phase workflow with the same security discipline as `/feature` but without the spec overhead.
+
+```
+  1. Diagnose ──► 2. Fix & Test ──► 3. Verify & Commit
+       │                │                    │
+       ▼                ▼                    ▼
+   [Review]         [Review]             [Done]
+```
+
+### Phase 1: Diagnose
+
+Trace the code path, find the root cause, and classify security impact:
+
+| Classification | Meaning | Extra steps |
+|---------------|---------|-------------|
+| **Security bug** | The bug is a vulnerability | Read threat model, assess exploitability, check for similar patterns |
+| **Security-adjacent** | In security code but not exploitable | Read relevant specs, assess blast radius |
+| **Non-security** | No security implications | Standard fix process |
+
+Present the diagnosis (root cause, security classification, proposed fix, blast radius) and wait for approval.
+
+### Phase 2: Fix & Test
+
+Minimal fix targeting the root cause, plus a regression test that fails without the fix. Pass the quality gate (fmt, clippy, tests).
+
+For security bugs: verify the fix closes the attack vector, not just the specific trigger.
+
+### Phase 3: Verify & Commit
+
+For security/security-adjacent bugs: check for similar patterns elsewhere (flag, don't fix), update `docs/security.md` if needed.
+
+Commit as `fix(scope): description` or `security(scope): description` for security bugs.
+
+**Key rules:**
+- Always diagnose before fixing — understand the root cause, not the symptom
+- Always write a regression test — if a bug happened once, it can happen again
+- Stay focused — one bug, one fix, one commit; flag adjacent issues for follow-up
+
+## Other Changes
+
+Not everything needs a phased workflow. Use judgment:
 
 | Change | Process |
 |--------|---------|
-| Bug fix in existing feature | `/fix` — diagnose, fix, test, commit |
 | Refactoring for clarity | `/refactor` — simplify, verify tests pass, commit |
 | Adding tests | `/test` — write tests, commit |
 | Doc updates | `/sync-docs` — update, commit |
 | SDK dependency bump | `/upgrade-sdk` — follow UPGRADING.md exactly |
-| New feature or behavior change | `/feature` — full lifecycle |
+| New feature or behavior change | `/feature` — full six-phase lifecycle |
 | Changing implemented behavior | New spec that supersedes the old one, then `/feature` |
 
-The key distinction: if it changes **what the system does** (new capability, changed behavior), it needs a spec and the full lifecycle. If it changes **how** the system does something it already does (refactor, bug fix, test), it doesn't.
+The key distinction: if it changes **what the system does** (new capability, changed behavior), it needs `/feature`. If it fixes something broken, `/fix`. If it changes **how** the system does something it already does (refactor, test, docs), use the appropriate standalone command.
