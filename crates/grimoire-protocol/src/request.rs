@@ -38,7 +38,7 @@ pub enum RequestParams {
     Empty(EmptyParams),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginParams {
     pub email: String,
@@ -49,7 +49,17 @@ pub struct LoginParams {
     pub server_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for LoginParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginParams")
+            .field("email", &self.email)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("server_url", &self.server_url)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnlockParams {
     /// If omitted, the service will spawn the prompt agent to ask interactively.
@@ -57,10 +67,26 @@ pub struct UnlockParams {
     pub password: Option<Zeroizing<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for UnlockParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnlockParams")
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPinParams {
     pub pin: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for SetPinParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetPinParams")
+            .field("pin", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +99,7 @@ pub struct VaultListParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultGetParams {
     pub id: String,
     #[serde(default)]
@@ -87,6 +114,7 @@ pub struct VaultTotpParams {
 
 /// A single vault reference to resolve.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultRef {
     /// Item ID (full UUID or prefix, minimum 6 chars) or name (if prefixed with //)
     pub id: String,
@@ -101,6 +129,7 @@ pub struct ResolveRefsParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshSignParams {
     pub key_id: String,
     pub data: Vec<u8>,

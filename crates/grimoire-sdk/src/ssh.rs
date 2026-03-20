@@ -17,12 +17,6 @@ pub struct SshClient {
 }
 
 impl SshClient {
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(Mutex::new(PasswordManagerClient::new(None))),
-        }
-    }
-
     /// List SSH keys stored in the vault.
     pub async fn list_keys(&self) -> Result<Vec<SshKeyInfo>, SdkError> {
         let pm = self.client.lock().await;

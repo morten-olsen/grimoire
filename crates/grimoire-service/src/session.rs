@@ -1,4 +1,4 @@
-use grimoire_common::config::{PromptMethod, PIN_MAX_ATTEMPTS, APPROVAL_SECONDS};
+use grimoire_common::config::{PromptMethod, APPROVAL_SECONDS};
 use grimoire_protocol::codec::{handshake_server, read_message, write_message};
 use grimoire_protocol::request::{
     methods, LoginParams, ResolveRefsParams, Request, RequestParams, SetPinParams, SshSignParams,
@@ -58,12 +58,20 @@ pub async fn handle_client(stream: UnixStream, state: SharedState, peer_pid: Opt
 ///
 /// Approval is always scoped to the terminal session leader PID.
 /// All processes in the same terminal session share one approval grant.
+/// When the peer PID cannot be determined, a unique monotonic scope key is used
+/// to prevent unrelated connections from sharing approval grants.
 pub(crate) fn resolve_scope_key(peer_pid: Option<u32>) -> u32 {
-    // Walk to session leader PID; fall back to peer PID
+    static UNKNOWN_SCOPE_COUNTER: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(u32::MAX);
+
     peer_pid
         .and_then(crate::peer::get_session_leader)
         .or(peer_pid)
-        .unwrap_or(0)
+        .unwrap_or_else(|| {
+            // Each unresolvable connection gets a unique scope key, counting down from
+            // u32::MAX to avoid colliding with real PIDs (which are small positive integers).
+            UNKNOWN_SCOPE_COUNTER.fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+        })
 }
 
 /// Methods that require vault access and are gated behind access approval.
@@ -80,67 +88,7 @@ fn requires_approval(method: &str) -> bool {
     )
 }
 
-/// Attempt approval via prompt — biometric, then PIN, then password dialog.
-/// Returns true if the user was approved, false if denied or cancelled.
-/// On PIN exhaustion, auto-locks the vault and returns false.
-async fn attempt_approval(
-    state: &SharedState,
-    prompt_method: &PromptMethod,
-) -> bool {
-    // Check PIN exhaustion — too many failures → auto-lock
-    {
-        let s = state.read().await;
-        if s.pin_attempts_exceeded() {
-            tracing::info!("PIN attempts exceeded, locking vault");
-            drop(s);
-            let mut s = state.write().await;
-            let _ = s.lock().await;
-            return false;
-        }
-    }
-
-    // Try biometric first
-    if *prompt_method != PromptMethod::Terminal {
-        match prompt::prompt_biometric(prompt_method, "Grimoire: approve vault access").await {
-            Ok(true) => return true,
-            Ok(false) => {} // Cancelled or unavailable, fall through
-            Err(e) => {
-                tracing::debug!("Biometric unavailable: {e}");
-            }
-        }
-    }
-
-    // Try PIN if set
-    let has_pin = state.read().await.pin_set();
-    if has_pin {
-        let attempt = {
-            let s = state.read().await;
-            s.session.as_ref().map(|s| s.pin_attempts + 1).unwrap_or(1)
-        };
-        let pin_max = PIN_MAX_ATTEMPTS;
-        match prompt::prompt_pin(prompt_method, attempt, pin_max).await {
-            Ok(Some(pin)) => {
-                let mut s = state.write().await;
-                if s.verify_pin(&pin) {
-                    return true;
-                }
-                // PIN failed — check if now exceeded
-                if s.pin_attempts_exceeded() {
-                    tracing::info!("PIN attempts exceeded after failure, locking vault");
-                    let _ = s.lock().await;
-                }
-                return false;
-            }
-            _ => return false, // Cancelled
-        }
-    }
-
-    // No biometric, no PIN — fall back to password prompt (GUI dialog)
-    match prompt::prompt_password(prompt_method).await {
-        Ok(Some(_)) => true,
-        _ => false,
-    }
-}
+// Approval logic is in crate::approval — shared with the SSH agent.
 
 async fn dispatch(request: &Request, state: &SharedState, peer_pid: Option<u32>) -> Response {
     let id = request.id;
@@ -169,10 +117,8 @@ async fn dispatch(request: &Request, state: &SharedState, peer_pid: Option<u32>)
         if !already_approved {
             tracing::info!(scope_key, "Access approval required, prompting user");
 
-            if attempt_approval(state, &prompt_method).await {
-                let duration = std::time::Duration::from_secs(APPROVAL_SECONDS);
-                state.write().await.approval_cache.grant(scope_key, duration);
-                tracing::info!(scope_key, "Access approved");
+            if crate::approval::attempt_approval(state, &prompt_method, peer_pid).await {
+                // Approval granted and cached by attempt_approval
             } else {
                 // Check if vault was locked by PIN exhaustion
                 if state.read().await.vault_state != VaultState::Unlocked {
@@ -217,7 +163,7 @@ async fn handle_status(id: Option<u64>, state: &SharedState) -> Response {
             None
         },
     };
-    Response::success(id, serde_json::to_value(result).unwrap())
+    success_result(id, result)
 }
 
 async fn handle_login(
@@ -273,7 +219,7 @@ async fn handle_login(
     {
         Ok(_) => {
             s.reset_password_attempts();
-            Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap())
+            success_result(id, OkResult { ok: true })
         }
         Err(SdkError::AuthFailed(msg)) => {
             s.record_password_failure();
@@ -353,7 +299,7 @@ async fn handle_unlock(
                 crate::sync_worker::sync_now(&sync_state).await;
             });
 
-            Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap())
+            success_result(id, OkResult { ok: true })
         }
         Err(SdkError::AuthFailed(msg)) => {
             s.record_password_failure();
@@ -366,7 +312,7 @@ async fn handle_unlock(
 async fn handle_lock(id: Option<u64>, state: &SharedState) -> Response {
     let mut s = state.write().await;
     match s.lock().await {
-        Ok(()) => Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap()),
+        Ok(()) => success_result(id, OkResult { ok: true }),
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
 }
@@ -374,7 +320,7 @@ async fn handle_lock(id: Option<u64>, state: &SharedState) -> Response {
 async fn handle_logout(id: Option<u64>, state: &SharedState) -> Response {
     let mut s = state.write().await;
     match s.logout().await {
-        Ok(()) => Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap()),
+        Ok(()) => success_result(id, OkResult { ok: true }),
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
 }
@@ -390,7 +336,7 @@ async fn handle_set_pin(
 
     let mut s = state.write().await;
     match s.set_pin(pin.clone()) {
-        Ok(()) => Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap()),
+        Ok(()) => success_result(id, OkResult { ok: true }),
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
 }
@@ -448,7 +394,7 @@ async fn handle_authorize(
             s.approval_cache.grant(scope_key, duration);
 
             tracing::info!(scope_key, "Authorized via master password");
-            Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap())
+            success_result(id, OkResult { ok: true })
         }
         Err(SdkError::AuthFailed(msg)) => {
             state.write().await.record_password_failure();
@@ -487,7 +433,7 @@ async fn handle_vault_list(
                     uri: c.uri,
                 })
                 .collect();
-            Response::success(id, serde_json::to_value(out).unwrap())
+            success_result(id, out)
         }
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
@@ -515,7 +461,7 @@ async fn handle_vault_get(
                 notes: detail.notes,
                 totp: detail.totp,
             };
-            Response::success(id, serde_json::to_value(out).unwrap())
+            success_result(id, out)
         }
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
@@ -534,7 +480,7 @@ async fn handle_vault_totp(
     match s.vault_totp(item_id).await {
         Ok(code) => {
             let out = TotpResult { code, period: 30 };
-            Response::success(id, serde_json::to_value(out).unwrap())
+            success_result(id, out)
         }
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
@@ -581,7 +527,7 @@ async fn handle_resolve_refs(
         });
     }
 
-    Response::success(id, serde_json::to_value(&results).unwrap())
+    success_result(id, &results)
 }
 
 /// Resolve a single vault reference by ID prefix or name.
@@ -650,7 +596,7 @@ async fn handle_ssh_list_keys(id: Option<u64>, state: &SharedState) -> Response 
                     fingerprint: k.fingerprint,
                 })
                 .collect();
-            Response::success(id, serde_json::to_value(out).unwrap())
+            success_result(id, out)
         }
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
@@ -677,7 +623,7 @@ async fn handle_ssh_sign(
 
     match sdk.ssh().sign(key_id, data, *flags).await {
         Ok(signature) => {
-            Response::success(id, serde_json::to_value(serde_json::json!({ "signature": signature })).unwrap())
+            success_result(id, serde_json::json!({ "signature": signature }))
         }
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
@@ -699,7 +645,7 @@ async fn handle_sync_trigger(id: Option<u64>, state: &SharedState) -> Response {
         Ok(()) => {
             let mut s = state.write().await;
             s.last_sync = Some(chrono::Utc::now());
-            Response::success(id, serde_json::to_value(OkResult { ok: true }).unwrap())
+            success_result(id, OkResult { ok: true })
         }
         Err(e) => Response::error(id, RpcError::new(1004, format!("Sync failed: {e}"))),
     }
@@ -713,6 +659,16 @@ async fn handle_sync_status(id: Option<u64>, state: &SharedState) -> Response {
     Response::success(id, result)
 }
 
+/// Build a success response, handling the (unlikely) serialization failure gracefully
+/// instead of panicking. All response structs are simple `#[derive(Serialize)]` types
+/// with primitive fields, so this should never fail in practice.
+fn success_result<T: serde::Serialize>(id: Option<u64>, value: T) -> Response {
+    match serde_json::to_value(value) {
+        Ok(v) => Response::success(id, v),
+        Err(e) => Response::error(id, RpcError::internal(format!("Serialization failed: {e}"))),
+    }
+}
+
 fn sdk_err_to_rpc(e: SdkError) -> RpcError {
     match e {
         SdkError::VaultLocked => RpcError::vault_locked(),
@@ -720,6 +676,11 @@ fn sdk_err_to_rpc(e: SdkError) -> RpcError {
         SdkError::AuthFailed(msg) => RpcError::auth_failed(msg),
         SdkError::NotFound(id) => RpcError::item_not_found(&id),
         SdkError::SyncFailed(msg) => RpcError::new(1004, msg),
-        SdkError::Internal(msg) => RpcError::internal(msg),
+        SdkError::Internal(msg) => {
+            // Log the detailed error server-side; return a generic message to the client
+            // to avoid leaking filesystem paths, library errors, or other internal state.
+            tracing::error!("Internal error: {msg}");
+            RpcError::internal("Internal error")
+        }
     }
 }

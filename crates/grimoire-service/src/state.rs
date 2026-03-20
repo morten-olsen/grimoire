@@ -229,7 +229,7 @@ impl ServiceState {
             return Err(match self.vault_state {
                 VaultState::LoggedOut => SdkError::NotLoggedIn,
                 VaultState::Unlocked => SdkError::Internal("Already unlocked".into()),
-                _ => unreachable!(),
+                VaultState::Locked => SdkError::VaultLocked, // matched above, defensive
             });
         }
 
@@ -281,6 +281,11 @@ impl ServiceState {
     pub fn set_pin(&mut self, pin: Zeroizing<String>) -> Result<(), SdkError> {
         if self.vault_state != VaultState::Unlocked {
             return Err(SdkError::VaultLocked);
+        }
+        if pin.is_empty() || pin.len() < 4 {
+            return Err(SdkError::Internal(
+                "PIN must be at least 4 characters".into(),
+            ));
         }
         if let Some(session) = &mut self.session {
             session.pin = Some(pin);

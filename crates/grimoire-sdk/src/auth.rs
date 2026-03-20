@@ -32,15 +32,30 @@ pub struct LoginState {
 }
 
 /// Token store shared with the SDK via `ClientManagedTokens`.
-#[derive(Debug)]
+///
+/// The access token is stored in `Zeroizing<String>` so it is zeroed on drop.
+/// The SDK trait requires returning a plain `String`, so we clone on read —
+/// the SDK internally uses `ZeroizingAllocator` which mitigates that copy.
 pub(crate) struct TokenStore {
-    pub(crate) access_token: RwLock<Option<String>>,
+    pub(crate) access_token: RwLock<Option<Zeroizing<String>>>,
+}
+
+impl std::fmt::Debug for TokenStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenStore")
+            .field("access_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[async_trait::async_trait]
 impl bitwarden_core::auth::auth_tokens::ClientManagedTokens for TokenStore {
     async fn get_access_token(&self) -> Option<String> {
-        self.access_token.read().await.clone()
+        self.access_token
+            .read()
+            .await
+            .as_ref()
+            .map(|t| t.to_string())
     }
 }
 
@@ -50,15 +65,6 @@ pub struct AuthClient {
 }
 
 impl AuthClient {
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(Mutex::new(PasswordManagerClient::new(None))),
-            token_store: Arc::new(TokenStore {
-                access_token: RwLock::new(None),
-            }),
-        }
-    }
-
     /// Login: verify credentials against the server but do NOT initialize crypto.
     /// The vault stays locked after login — unlock is a separate step.
     pub async fn login(
@@ -114,7 +120,7 @@ impl AuthClient {
         let token_response = login_token_request(&http, url, email, &password_hash).await?;
 
         *self.token_store.access_token.write().await =
-            Some(token_response.access_token.clone());
+            Some(Zeroizing::new(token_response.access_token.clone()));
 
         Ok(())
     }
@@ -146,7 +152,7 @@ impl AuthClient {
         let token_response = login_token_request(&http, url, email, &password_hash).await?;
 
         *self.token_store.access_token.write().await =
-            Some(token_response.access_token.clone());
+            Some(Zeroizing::new(token_response.access_token.clone()));
 
         // Step 5: Initialize user crypto
         let private_key: EncString = token_response
@@ -259,9 +265,15 @@ async fn prelogin(http: &reqwest::Client, server_url: &str, email: &str) -> Resu
         .or_else(|| data["KdfIterations"].as_i64())
         .unwrap_or(600000);
 
+    // Safe cast helper — rejects negative values and values > u32::MAX.
+    let to_u32 = |v: i64, name: &str| -> Result<u32, SdkError> {
+        u32::try_from(v)
+            .map_err(|_| SdkError::Internal(format!("KDF {name} out of u32 range: {v}")))
+    };
+
     match kdf_type {
         0 => Ok(Kdf::PBKDF2 {
-            iterations: NonZeroU32::new(iterations as u32)
+            iterations: NonZeroU32::new(to_u32(iterations, "iterations")?)
                 .ok_or_else(|| SdkError::Internal("Zero KDF iterations".into()))?,
         }),
         1 => {
@@ -274,11 +286,11 @@ async fn prelogin(http: &reqwest::Client, server_url: &str, email: &str) -> Resu
                 .or_else(|| data["KdfParallelism"].as_i64())
                 .ok_or_else(|| SdkError::Internal("Missing Argon2 parallelism".into()))?;
             Ok(Kdf::Argon2id {
-                iterations: NonZeroU32::new(iterations as u32)
+                iterations: NonZeroU32::new(to_u32(iterations, "iterations")?)
                     .ok_or_else(|| SdkError::Internal("Zero iterations".into()))?,
-                memory: NonZeroU32::new(memory as u32)
+                memory: NonZeroU32::new(to_u32(memory, "memory")?)
                     .ok_or_else(|| SdkError::Internal("Zero memory".into()))?,
-                parallelism: NonZeroU32::new(parallelism as u32)
+                parallelism: NonZeroU32::new(to_u32(parallelism, "parallelism")?)
                     .ok_or_else(|| SdkError::Internal("Zero parallelism".into()))?,
             })
         }

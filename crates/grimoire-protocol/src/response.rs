@@ -39,6 +39,15 @@ pub struct RpcError {
     pub data: Option<serde_json::Value>,
 }
 
+/// Error codes for matching in client code.
+pub mod error_codes {
+    pub const VAULT_LOCKED: i32 = 1000;
+    pub const NOT_LOGGED_IN: i32 = 1001;
+    pub const SESSION_EXPIRED: i32 = 1006;
+    pub const PROMPT_UNAVAILABLE: i32 = 1008;
+    pub const ACCESS_DENIED: i32 = 1011;
+}
+
 impl RpcError {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
         Self {

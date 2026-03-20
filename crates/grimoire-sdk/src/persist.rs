@@ -8,7 +8,8 @@ use crate::auth::LoginState;
 use crate::error::SdkError;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize)]
@@ -39,11 +40,15 @@ pub fn save_login_state(state: &LoginState) -> Result<(), SdkError> {
     let json = serde_json::to_string_pretty(&persisted)
         .map_err(|e| SdkError::Internal(format!("Failed to serialize: {e}")))?;
 
-    fs::write(&path, &json)
+    // Create file with 0600 permissions atomically — no TOCTOU window.
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut f| f.write_all(json.as_bytes()))
         .map_err(|e| SdkError::Internal(format!("Failed to write {}: {e}", path.display())))?;
-
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-        .map_err(|e| SdkError::Internal(format!("Failed to set permissions: {e}")))?;
 
     tracing::info!("Login state saved to {}", path.display());
     Ok(())

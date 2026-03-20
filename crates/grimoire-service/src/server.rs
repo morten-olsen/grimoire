@@ -84,6 +84,7 @@ pub async fn run(config: Config) -> Result<()> {
                         {
                             match stream.peer_cred() {
                                 Ok(cred) => {
+                                    // SAFETY: getuid() is a read-only syscall with no preconditions.
                                     let my_uid = unsafe { libc::getuid() };
                                     if cred.uid() != my_uid {
                                         tracing::warn!(

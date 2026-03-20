@@ -5,7 +5,7 @@ use grimoire_protocol::request::{
     methods, LoginParams, Request, RequestParams, UnlockParams, VaultGetParams, VaultListParams,
     VaultTotpParams,
 };
-use grimoire_protocol::response::Response;
+use grimoire_protocol::response::{error_codes, Response};
 use clap::{CommandFactory, Parser, Subcommand};
 use tokio::net::UnixStream;
 use zeroize::Zeroizing;
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
     // commands directly without a separate unlock/authorize step.
     if let Some(err) = &response.error {
         match err.code {
-            1000 => {
+            error_codes::VAULT_LOCKED => {
                 // Vault locked — unlock with master password, then retry.
                 // Unlock with a direct password also grants access approval,
                 // so authorize doesn't need to be retried.
@@ -277,7 +277,9 @@ async fn main() -> Result<()> {
                     response = send_request(request).await?;
                 }
             }
-            1006 | 1008 | 1011 => {
+            error_codes::SESSION_EXPIRED
+            | error_codes::PROMPT_UNAVAILABLE
+            | error_codes::ACCESS_DENIED => {
                 // Session expired / prompt unavailable / access approval denied
                 eprintln!("Authorization required.");
                 let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
@@ -378,6 +380,11 @@ fn install_service() -> Result<()> {
         std::fs::create_dir_all(&plist_dir)?;
 
         let plist_path = plist_dir.join("com.grimoire.service.plist");
+        let log_dir = dirs::home_dir()
+            .context("Cannot determine home dir")?
+            .join("Library/Logs/Grimoire");
+        std::fs::create_dir_all(&log_dir)?;
+        let log_dir = log_dir.display();
         let ssh_sock = grimoire_common::socket::ssh_agent_socket_path();
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -398,9 +405,9 @@ fn install_service() -> Result<()> {
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/grimoire-service.log</string>
+    <string>{log_dir}/grimoire-service.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/grimoire-service.log</string>
+    <string>{log_dir}/grimoire-service.log</string>
 </dict>
 </plist>"#,
             service_bin.display()
@@ -533,7 +540,7 @@ async fn handle_run(command: Vec<String>) -> Result<()> {
         // Auto-prompt if vault is locked or authorization is needed
         if let Some(err) = &response.error {
             match err.code {
-                1000 => {
+                error_codes::VAULT_LOCKED => {
                     eprintln!("Vault is locked.");
                     let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
                         .context("Failed to read password")?);
@@ -550,7 +557,9 @@ async fn handle_run(command: Vec<String>) -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     response = send_request(resolve_request).await?;
                 }
-                1006 | 1008 | 1011 => {
+                error_codes::SESSION_EXPIRED
+            | error_codes::PROMPT_UNAVAILABLE
+            | error_codes::ACCESS_DENIED => {
                     eprintln!("Authorization required.");
                     let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
                         .context("Failed to read password")?);
@@ -573,8 +582,11 @@ async fn handle_run(command: Vec<String>) -> Result<()> {
             anyhow::bail!("{}", err.message);
         }
 
-        let resolved: Vec<ResolvedRef> =
-            serde_json::from_value(response.result.unwrap_or_default())?;
+        let resolved: Vec<ResolvedRef> = serde_json::from_value(
+            response
+                .result
+                .context("Service returned no result for vault.resolve_refs")?,
+        )?;
 
         // Check for errors before exec (can't report after)
         let mut had_errors = false;

@@ -1,5 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use grimoire_protocol::response::{Response, StatusResult, TotpResult, VaultItem, VaultItemDetail};
+
+/// Extract the result payload from a successful response.
+fn result_value(response: Response) -> Result<serde_json::Value> {
+    response
+        .result
+        .context("Service returned no result payload")
+}
 
 pub fn handle_status(response: Response, json: bool) -> Result<()> {
     check_error(&response)?;
@@ -8,7 +15,7 @@ pub fn handle_status(response: Response, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let result: StatusResult = serde_json::from_value(response.result.unwrap())?;
+    let result: StatusResult = serde_json::from_value(result_value(response)?)?;
     println!("State:  {}", result.state);
     if let Some(email) = &result.email {
         println!("Email:  {email}");
@@ -44,7 +51,7 @@ pub fn handle_unlock(response: Response, json: bool) -> Result<()> {
 
 pub fn handle_list(response: Response, json: bool) -> Result<()> {
     check_error(&response)?;
-    let items: Vec<VaultItem> = serde_json::from_value(response.result.unwrap())?;
+    let items: Vec<VaultItem> = serde_json::from_value(result_value(response)?)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&items)?);
@@ -65,7 +72,7 @@ pub fn handle_list(response: Response, json: bool) -> Result<()> {
 
 pub fn handle_get(response: Response, json: bool, field: Option<&str>) -> Result<()> {
     check_error(&response)?;
-    let detail: VaultItemDetail = serde_json::from_value(response.result.unwrap())?;
+    let detail: VaultItemDetail = serde_json::from_value(result_value(response)?)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&detail)?);
@@ -114,7 +121,7 @@ pub fn handle_get(response: Response, json: bool, field: Option<&str>) -> Result
 
 pub fn handle_totp(response: Response, json: bool) -> Result<()> {
     check_error(&response)?;
-    let totp: TotpResult = serde_json::from_value(response.result.unwrap())?;
+    let totp: TotpResult = serde_json::from_value(result_value(response)?)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&totp)?);

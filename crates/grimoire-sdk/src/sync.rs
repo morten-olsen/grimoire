@@ -17,15 +17,6 @@ pub struct SyncClient {
 }
 
 impl SyncClient {
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(Mutex::new(PasswordManagerClient::new(None))),
-            token_store: Arc::new(TokenStore {
-                access_token: tokio::sync::RwLock::new(None),
-            }),
-        }
-    }
-
     /// Trigger a full vault sync.
     pub async fn sync(&self, server_url: &str) -> Result<(), SdkError> {
         let token = self
@@ -40,7 +31,7 @@ impl SyncClient {
         let http = reqwest::Client::new();
         let resp = http
             .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {}", &*token))
             .header("Bitwarden-Client-Name", "desktop")
             .header("Bitwarden-Client-Version", "2025.1.1")
             .header("Device-Type", "8")

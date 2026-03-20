@@ -11,6 +11,7 @@ pub fn runtime_dir() -> PathBuf {
         // Use the real UID, not PID. This prevents symlink race attacks
         // where an attacker pre-creates /tmp/grimoire-<predictable-pid>/.
         #[cfg(unix)]
+        // SAFETY: getuid() is a read-only syscall with no preconditions or failure modes.
         let uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
         let uid = std::process::id(); // non-Unix fallback (best effort)

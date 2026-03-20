@@ -9,8 +9,6 @@
 //! rejected — the user must pre-authorize via `grimoire authorize` or the GUI
 //! prompt will be triggered (if available).
 
-use grimoire_common::config::{PIN_MAX_ATTEMPTS, APPROVAL_SECONDS};
-use crate::prompt;
 use crate::session::resolve_scope_key;
 use crate::state::{SharedState, VaultState};
 use ssh_agent_lib::proto::{Identity, SignRequest};
@@ -135,11 +133,9 @@ impl ssh_agent_lib::agent::Session for SshAgentSession {
 
 impl SshAgentSession {
     /// Check access approval for this connection's scope.
-    /// If approval is not cached, tries GUI prompt (biometric → PIN → password).
-    /// If no GUI is available, returns false (user must pre-authorize via CLI).
+    /// Uses the shared approval flow (biometric → PIN → password with server verification).
+    /// If no GUI is available and approval is not cached, returns false.
     async fn check_approval(&self) -> Result<bool, ssh_agent_lib::error::AgentError> {
-        let prompt_method = self.state.read().await.prompt_method.clone();
-
         let scope_key = resolve_scope_key(self.peer_pid);
         let already_approved = {
             let s = self.state.read().await;
@@ -156,52 +152,18 @@ impl SshAgentSession {
             "SSH agent: access approval required, attempting prompt"
         );
 
-        // Try GUI prompt — biometric first, then PIN, then password.
-        // This is what makes the GUI flow work without requiring pre-authorization.
+        let prompt_method = self.state.read().await.prompt_method.clone();
         let approved =
-            match prompt::prompt_biometric(&prompt_method, "Grimoire: approve SSH signing").await {
-                Ok(true) => true,
-                _ => {
-                    // Biometric unavailable or failed — try PIN if set
-                    let has_pin = self.state.read().await.pin_set();
-                    if has_pin {
-                        let attempt = {
-                            let s = self.state.read().await;
-                            s.session
-                                .as_ref()
-                                .map(|s| s.pin_attempts + 1)
-                                .unwrap_or(1)
-                        };
-                        match prompt::prompt_pin(&prompt_method, attempt, PIN_MAX_ATTEMPTS).await {
-                            Ok(Some(pin)) => self.state.write().await.verify_pin(&pin),
-                            _ => false,
-                        }
-                    } else {
-                        // No biometric, no PIN — try password prompt (GUI dialog)
-                        match prompt::prompt_password(&prompt_method).await {
-                            Ok(Some(_)) => true,
-                            _ => false,
-                        }
-                    }
-                }
-            };
+            crate::approval::attempt_approval(&self.state, &prompt_method, self.peer_pid).await;
 
-        if approved {
-            let duration = std::time::Duration::from_secs(APPROVAL_SECONDS);
-            self.state
-                .write()
-                .await
-                .approval_cache
-                .grant(scope_key, duration);
-            tracing::info!(scope_key, "SSH agent: access approved");
-            Ok(true)
-        } else {
+        if !approved {
             tracing::info!(
                 scope_key,
                 "SSH agent: approval denied — run `grimoire authorize`"
             );
-            Ok(false)
         }
+
+        Ok(approved)
     }
 }
 

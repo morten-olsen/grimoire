@@ -97,12 +97,6 @@ pub struct VaultClient {
 }
 
 impl VaultClient {
-    pub fn new() -> Self {
-        Self {
-            client: Arc::new(Mutex::new(PasswordManagerClient::new(None))),
-        }
-    }
-
     /// List vault items, optionally filtered.
     pub async fn list(&self, filter: VaultFilter) -> Result<Vec<CipherSummary>, SdkError> {
         let pm = self.client.lock().await;

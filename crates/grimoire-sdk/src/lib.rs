@@ -17,7 +17,6 @@ use bitwarden_pm::PasswordManagerClient;
 use bitwarden_state::DatabaseConfiguration;
 use bitwarden_vault::{Cipher, Folder};
 use state::InMemoryRepository;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -50,8 +49,10 @@ impl GrimoireClient {
         let pm = PasswordManagerClient::new_with_client_tokens(Some(settings), token_store.clone());
 
         // Initialize the SDK's state database (SQLite) for SDK-managed repositories.
+        // Never fall back to /tmp — world-writable directories are not acceptable for a
+        // password manager's state database.
         let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .expect("Cannot determine data directory (XDG_DATA_HOME / platform equivalent)")
             .join("grimoire");
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             tracing::warn!("Failed to create data dir {}: {e}", data_dir.display());

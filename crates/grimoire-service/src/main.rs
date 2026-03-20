@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
+mod approval;
 mod config;
 mod peer;
 mod prompt;
@@ -34,6 +35,9 @@ async fn main() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn harden_memory() {
+    // SAFETY: mlockall takes only flag constants — no pointers, no preconditions.
+    // prctl with PR_SET_DUMPABLE takes a single integer argument. Both are
+    // process-level operations with no memory safety implications.
     unsafe {
         // Prevent swapping of sensitive data
         if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {

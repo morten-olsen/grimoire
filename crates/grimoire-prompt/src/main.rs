@@ -32,8 +32,8 @@ enum Mode {
         /// Current attempt number (affects delay display)
         #[arg(long, default_value_t = 1)]
         attempt: u32,
-        /// Maximum allowed attempts
-        #[arg(long, default_value_t = 5)]
+        /// Maximum allowed attempts (matches grimoire-common::config::PIN_MAX_ATTEMPTS)
+        #[arg(long, default_value_t = 3)]
         max_attempts: u32,
     },
 }
@@ -82,7 +82,8 @@ impl PromptResult {
     }
 
     fn emit(&self) -> ! {
-        let json = serde_json::to_string(self).expect("serialize prompt result");
+        let json = serde_json::to_string(self)
+            .unwrap_or_else(|_| r#"{"status":"error","message":"serialization failed"}"#.into());
         println!("{json}");
         let code = match self.status.as_str() {
             "ok" | "verified" => 0,

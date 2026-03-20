@@ -44,37 +44,85 @@ impl Codec for PlainCodec {
     }
 }
 
-/// Encrypted codec using ChaCha20-Poly1305 AEAD.
+/// Encrypted codec using ChaCha20-Poly1305 AEAD with directional keys.
 ///
 /// Wire format per message: `[4-byte length][8-byte nonce counter][ciphertext + 16-byte tag]`
 ///
 /// The length prefix covers `nonce_counter + ciphertext + tag`. The 12-byte AEAD nonce
 /// is constructed as `[0u8; 4] ++ [counter as u64 LE]`, ensuring uniqueness as long as
 /// the counter doesn't wrap (2^64 messages per direction per connection).
+///
+/// **Directional keys**: The shared DH secret is expanded via HKDF-SHA256 into two
+/// independent keys — one for sending, one for receiving. This prevents nonce reuse
+/// when both sides start their counters at 0.
+///
+/// **Replay protection**: The codec tracks the last accepted receive counter and
+/// rejects any message with a counter ≤ the last accepted value.
 pub struct EncryptedCodec {
-    cipher: chacha20poly1305::ChaCha20Poly1305,
+    send_cipher: chacha20poly1305::ChaCha20Poly1305,
+    recv_cipher: chacha20poly1305::ChaCha20Poly1305,
     send_counter: std::sync::atomic::AtomicU64,
+    recv_counter: std::sync::atomic::AtomicU64,
+}
+
+/// Derive two 32-byte directional keys from a shared secret using HKDF-SHA256.
+fn derive_directional_keys(shared_secret: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+
+    let mut client_to_server = [0u8; 32];
+    hk.expand(b"grimoire-ipc-c2s", &mut client_to_server)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+
+    let mut server_to_client = [0u8; 32];
+    hk.expand(b"grimoire-ipc-s2c", &mut server_to_client)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+
+    (client_to_server, server_to_client)
 }
 
 impl EncryptedCodec {
-    /// Create a new encrypted codec from a 32-byte shared secret.
-    pub fn new(shared_secret: [u8; 32]) -> Self {
+    /// Create a client-side encrypted codec from a 32-byte shared secret.
+    /// Client sends with the c2s key and receives with the s2c key.
+    pub fn new_client(shared_secret: [u8; 32]) -> Self {
         use chacha20poly1305::KeyInit;
+        let (c2s_key, s2c_key) = derive_directional_keys(&shared_secret);
         Self {
-            cipher: chacha20poly1305::ChaCha20Poly1305::new(
-                chacha20poly1305::Key::from_slice(&shared_secret),
+            send_cipher: chacha20poly1305::ChaCha20Poly1305::new(
+                chacha20poly1305::Key::from_slice(&c2s_key),
+            ),
+            recv_cipher: chacha20poly1305::ChaCha20Poly1305::new(
+                chacha20poly1305::Key::from_slice(&s2c_key),
             ),
             send_counter: std::sync::atomic::AtomicU64::new(0),
+            recv_counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Create a server-side encrypted codec from a 32-byte shared secret.
+    /// Server sends with the s2c key and receives with the c2s key.
+    pub fn new_server(shared_secret: [u8; 32]) -> Self {
+        use chacha20poly1305::KeyInit;
+        let (c2s_key, s2c_key) = derive_directional_keys(&shared_secret);
+        Self {
+            send_cipher: chacha20poly1305::ChaCha20Poly1305::new(
+                chacha20poly1305::Key::from_slice(&s2c_key),
+            ),
+            recv_cipher: chacha20poly1305::ChaCha20Poly1305::new(
+                chacha20poly1305::Key::from_slice(&c2s_key),
+            ),
+            send_counter: std::sync::atomic::AtomicU64::new(0),
+            recv_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     fn next_nonce(&self) -> chacha20poly1305::Nonce {
         let counter = self
             .send_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut nonce_bytes = [0u8; 12];
-        nonce_bytes[4..].copy_from_slice(&counter.to_le_bytes());
-        *chacha20poly1305::Nonce::from_slice(&nonce_bytes)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self::nonce_from_counter(counter)
     }
 
     fn nonce_from_counter(counter: u64) -> chacha20poly1305::Nonce {
@@ -92,7 +140,7 @@ impl Codec for EncryptedCodec {
         let nonce = self.next_nonce();
 
         let ciphertext = self
-            .cipher
+            .send_cipher
             .encrypt(&nonce, plaintext.as_ref())
             .map_err(|e| CodecError::Crypto(format!("Encrypt failed: {e}")))?;
 
@@ -114,14 +162,28 @@ impl Codec for EncryptedCodec {
             return Err(CodecError::Crypto("Message too short for decryption".into()));
         }
 
-        // Parse counter from first 8 bytes
-        let counter = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-        let nonce = Self::nonce_from_counter(counter);
+        // Parse counter from first 8 bytes (length guaranteed by check above)
+        let counter = u64::from_le_bytes(
+            bytes[..8]
+                .try_into()
+                .expect("length checked: bytes.len() >= 24"),
+        );
 
+        // Replay protection: reject messages with counter ≤ last accepted
+        let last = self.recv_counter.load(std::sync::atomic::Ordering::SeqCst);
+        if counter < last || (counter == last && last > 0) {
+            return Err(CodecError::Crypto(
+                "Replayed or out-of-order message rejected".into(),
+            ));
+        }
+        self.recv_counter
+            .store(counter + 1, std::sync::atomic::Ordering::SeqCst);
+
+        let nonce = Self::nonce_from_counter(counter);
         let ciphertext = &bytes[8..];
 
         let plaintext = self
-            .cipher
+            .recv_cipher
             .decrypt(&nonce, ciphertext)
             .map_err(|_| CodecError::Crypto("Decryption failed — wrong key or tampered".into()))?;
 
@@ -136,6 +198,11 @@ impl Codec for EncryptedCodec {
 /// 3. Receive server's public key (32 bytes)
 /// 4. Compute shared secret
 /// 5. Return `EncryptedCodec` ready for use
+///
+/// SECURITY: This is an unauthenticated key exchange. Socket permissions (0600 + UID
+/// peer check) are the primary trust boundary; encryption provides defense-in-depth
+/// against passive eavesdropping and message tampering, not active MITM by a same-user
+/// process that can already connect to the socket.
 pub async fn handshake_client<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -161,7 +228,7 @@ where
     // Derive shared secret
     let shared = client_secret.diffie_hellman(&server_public);
 
-    Ok(EncryptedCodec::new(shared.to_bytes()))
+    Ok(EncryptedCodec::new_client(shared.to_bytes()))
 }
 
 /// Perform the server side of an X25519 key exchange.
@@ -171,6 +238,8 @@ where
 /// 3. Send our public key (32 bytes)
 /// 4. Compute shared secret
 /// 5. Return `EncryptedCodec` ready for use
+///
+/// SECURITY: See `handshake_client` — unauthenticated key exchange by design.
 pub async fn handshake_server<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -202,7 +271,7 @@ where
     // Derive shared secret
     let shared = server_secret.diffie_hellman(&client_public);
 
-    Ok(EncryptedCodec::new(shared.to_bytes()))
+    Ok(EncryptedCodec::new_server(shared.to_bytes()))
 }
 
 /// Write a length-prefixed message to an async writer.
@@ -328,63 +397,106 @@ mod tests {
     #[test]
     fn encrypted_codec_roundtrip() {
         let key = [42u8; 32];
-        let codec = EncryptedCodec::new(key);
+        let client = EncryptedCodec::new_client(key);
+        let server = EncryptedCodec::new_server(key);
         let msg = TestMsg {
             text: "secret".into(),
             num: 7,
         };
-        let encoded = codec.encode(&msg).unwrap();
-        // Encoded should be longer than plain (nonce counter + tag overhead)
+        // Client encodes, server decodes
+        let encoded = client.encode(&msg).unwrap();
         assert!(encoded.len() > 4 + 8);
-        // Decode: skip the 4-byte length prefix
-        let decoded: TestMsg = codec.decode(&encoded[4..]).unwrap();
+        let decoded: TestMsg = server.decode(&encoded[4..]).unwrap();
         assert_eq!(decoded, msg);
+
+        // Server encodes, client decodes
+        let reply = TestMsg {
+            text: "reply".into(),
+            num: 8,
+        };
+        let encoded = server.encode(&reply).unwrap();
+        let decoded: TestMsg = client.decode(&encoded[4..]).unwrap();
+        assert_eq!(decoded, reply);
     }
 
     #[test]
     fn encrypted_codec_tamper_detection() {
         let key = [42u8; 32];
-        let codec = EncryptedCodec::new(key);
+        let client = EncryptedCodec::new_client(key);
+        let server = EncryptedCodec::new_server(key);
         let msg = TestMsg {
             text: "tamper test".into(),
             num: 1,
         };
-        let mut encoded = codec.encode(&msg).unwrap();
+        let mut encoded = client.encode(&msg).unwrap();
         // Flip a byte in the ciphertext (after length prefix + counter)
         if encoded.len() > 14 {
             encoded[14] ^= 0xff;
         }
-        let result = codec.decode::<TestMsg>(&encoded[4..]);
+        let result = server.decode::<TestMsg>(&encoded[4..]);
         assert!(result.is_err());
     }
 
     #[test]
     fn encrypted_codec_wrong_key_fails() {
-        let codec1 = EncryptedCodec::new([1u8; 32]);
-        let codec2 = EncryptedCodec::new([2u8; 32]);
+        let client = EncryptedCodec::new_client([1u8; 32]);
+        let server = EncryptedCodec::new_server([2u8; 32]);
         let msg = TestMsg {
             text: "wrong key".into(),
             num: 0,
         };
-        let encoded = codec1.encode(&msg).unwrap();
-        let result = codec2.decode::<TestMsg>(&encoded[4..]);
+        let encoded = client.encode(&msg).unwrap();
+        let result = server.decode::<TestMsg>(&encoded[4..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_codec_cross_direction_fails() {
+        // Client-encoded messages must not be decodable by the client (wrong key direction)
+        let key = [42u8; 32];
+        let client = EncryptedCodec::new_client(key);
+        let msg = TestMsg {
+            text: "cross".into(),
+            num: 0,
+        };
+        let encoded = client.encode(&msg).unwrap();
+        let result = client.decode::<TestMsg>(&encoded[4..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_codec_replay_rejected() {
+        let key = [42u8; 32];
+        let client = EncryptedCodec::new_client(key);
+        let server = EncryptedCodec::new_server(key);
+        let msg = TestMsg {
+            text: "replay".into(),
+            num: 1,
+        };
+        let encoded = client.encode(&msg).unwrap();
+        // First decode succeeds
+        let decoded: TestMsg = server.decode(&encoded[4..]).unwrap();
+        assert_eq!(decoded, msg);
+        // Replay of same message is rejected
+        let result = server.decode::<TestMsg>(&encoded[4..]);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn encrypted_write_read_roundtrip() {
         let key = [99u8; 32];
-        let codec = EncryptedCodec::new(key);
+        let client = EncryptedCodec::new_client(key);
+        let server = EncryptedCodec::new_server(key);
         let msg = TestMsg {
             text: "encrypted roundtrip".into(),
             num: 42,
         };
 
         let mut buf = Vec::new();
-        write_message(&mut buf, &codec, &msg).await.unwrap();
+        write_message(&mut buf, &client, &msg).await.unwrap();
 
         let mut cursor = std::io::Cursor::new(buf);
-        let decoded: TestMsg = read_message(&mut cursor, &codec).await.unwrap();
+        let decoded: TestMsg = read_message(&mut cursor, &server).await.unwrap();
         assert_eq!(decoded, msg);
     }
 
