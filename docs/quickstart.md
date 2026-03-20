@@ -148,22 +148,23 @@ Optional config file at `~/.config/bitsafe/config.toml`:
 [server]
 url = "https://your-vaultwarden.example.com"
 
-[service]
-auto_lock_seconds = 900       # Lock after 15min inactivity (0 = disable)
-sync_interval_seconds = 300   # Background sync every 5min (0 = disable)
-
-[session]
-duration_seconds = 300        # Re-verify after 5min
-pin_enabled = true            # Allow PIN for re-verification
-pin_max_attempts = 3          # Lock vault after 3 wrong PINs
-biometric_enabled = true      # Try fingerprint before PIN
-
 [prompt]
 method = "auto"               # auto | gui | terminal | none
 
 [ssh_agent]
 enabled = true                # Disable to skip SSH agent socket
 ```
+
+Security parameters are hardcoded and not configurable:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Auto-lock | 900s (15 min) | Lock vault after inactivity |
+| Sync interval | 300s (5 min) | Background vault sync |
+| Approval duration | 300s (5 min) | Session approval timeout |
+| Approval scope | Session | Tied to terminal session leader PID |
+| PIN max attempts | 3 | Auto-lock after 3 wrong PINs |
+| Access approval | Always on | Cannot be disabled |
 
 ## Service Management
 

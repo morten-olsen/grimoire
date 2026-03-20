@@ -127,16 +127,14 @@ bitsafe unlock --terminal   # or just run any vault command (auto-prompts)
 ssh git@github.com          # already approved from the unlock
 ```
 
-### Disabling approval
+### Headless / CI environments
 
-For CI/headless environments where interactive approval is impractical:
+Access approval cannot be disabled. In headless environments, use `bitsafe authorize` to pre-approve access for the terminal session:
 
-```toml
-[access]
-require_approval = false
+```bash
+bitsafe authorize    # prompts for master password in terminal
+ssh git@github.com   # approved for this session
 ```
-
-With approval disabled, any process that can connect to the agent socket can sign.
 
 ## Timeouts and Auto-lock
 
@@ -148,12 +146,7 @@ The vault auto-locks after a period of inactivity (default: 900 seconds / 15 min
 - After auto-lock, `ssh-add -l` returns an empty list and signing fails silently
 - To keep the vault alive, any RPC operation (e.g. `bitsafe status`) resets the timer
 
-The auto-lock timeout is configurable:
-
-```toml
-[service]
-auto_lock_seconds = 3600  # 1 hour
-```
+The auto-lock timeout is hardcoded at 15 minutes and cannot be changed. If you need the vault to stay alive longer, any CLI vault command (e.g. `bitsafe status`) resets the timer.
 
 ## Security Considerations
 
@@ -186,21 +179,17 @@ Private keys are decrypted by the SDK and held in memory for the duration of the
 
 [ssh_agent]
 enabled = true              # Enable the embedded SSH agent (default: true)
-
-[service]
-auto_lock_seconds = 900     # Auto-lock after inactivity (default: 900)
-
-[session]
-duration_seconds = 300      # Session duration before re-verification (default: 300)
-biometric_enabled = true    # Try biometric for approval prompts (default: true)
-pin_enabled = true          # Allow PIN for approval (default: true)
-pin_max_attempts = 3        # PIN attempts before requiring master password (default: 3)
-
-[access]
-require_approval = true     # Require approval for signing (default: true)
-approval_seconds = 300      # How long an approval lasts (default: 300)
-approval_for = "session"    # Scope: session | pid | connection (default: session)
 ```
+
+Security parameters are hardcoded and not configurable:
+
+| Parameter | Value |
+|-----------|-------|
+| Auto-lock timeout | 900s (15 min) |
+| Approval duration | 300s (5 min) |
+| Approval scope | Terminal session (session leader PID) |
+| PIN max attempts | 3 (then auto-lock) |
+| Access approval | Always required |
 
 ## Troubleshooting
 

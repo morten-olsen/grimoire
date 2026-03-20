@@ -169,9 +169,10 @@ Key gotchas not obvious from the code:
 
 - `mlockall` + `PR_SET_DUMPABLE` at startup on Linux only — **logs warning and continues** if either fails. macOS has no equivalent.
 - Socket: `0600` perms + UID peer check on all Unix (`SO_PEERCRED` on Linux, `getpeereid` on macOS)
-- **No secret zeroization** — passwords and PINs are plain `String` throughout BitSafe code. The SDK uses `ZeroizingAllocator` internally for key material, but our wrapper layer doesn't zeroize.
-- **Scoped access approval** — all vault operations (`vault.list`, `vault.get`, `vault.totp`, `vault.resolve_refs`, `ssh.list_keys`, `ssh.sign`, `sync.trigger`) require per-session approval via biometric/PIN even when vault is unlocked. Same gate for CLI commands and SSH agent signing. Scoped to terminal session leader PID via `/proc/<pid>/stat` (Linux) or `getsid` (macOS). Configurable: `[access] require_approval`, `approval_seconds`, `approval_for` (session/pid/connection). Set `require_approval = false` for CI/headless. See `docs/lifecycle.md`.
+- **Secret zeroization** — all password and PIN fields use `zeroize::Zeroizing<String>` (zeroed on drop). The SDK uses `ZeroizingAllocator` internally for key material. The `UserKeyState` repository still holds a decrypted user key as base64 in a plain `String` — this is SDK-managed state and needs an upstream fix.
+- **Scoped access approval** — all vault operations (`vault.list`, `vault.get`, `vault.totp`, `vault.resolve_refs`, `ssh.list_keys`, `ssh.sign`, `sync.trigger`) require per-session approval via biometric/PIN even when vault is unlocked. Same gate for CLI commands and SSH agent signing. Scoped to terminal session leader PID via `/proc/<pid>/stat` (Linux) or `getsid` (macOS). **Always on, not configurable.** Hardcoded: 300s approval duration, session scope, 3 PIN attempts. See `docs/lifecycle.md`.
+- **Security parameters are hardcoded constants** — auto-lock (900s), sync interval (300s), approval duration (300s), approval scope (session), PIN max attempts (3), approval required (always). Config file only controls: server URL, prompt method, SSH agent enabled. This prevents config-based downgrade attacks.
+- **Encrypted IPC** — every connection performs X25519 key exchange + ChaCha20-Poly1305 AEAD. Socket permissions remain the primary trust boundary; encryption provides defense-in-depth.
 - PIN constant-time comparison leaks length (early return on length mismatch) — acceptable for short PINs
-- No IPC encryption yet — `PlainCodec` only. Socket permissions are the trust boundary.
 - Socket fallback path uses `libc::getuid()` (real UID). `$XDG_RUNTIME_DIR` preferred when available.
 - Prompt binary discovered via PATH fallback — binary replacement risk if attacker controls PATH

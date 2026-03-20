@@ -31,18 +31,24 @@ We do **not** currently defend against:
 - `bitwarden-crypto` uses `ZeroizingAllocator` and `KeyStore` internally for key material
 - We never extract raw keys from the SDK — all crypto ops go through `PasswordManagerClient`
 
+### Password and PIN zeroization
+
+All password and PIN fields use `zeroize::Zeroizing<String>` — memory is zeroed on drop. This covers:
+- `LoginParams.password` and `UnlockParams.password` in protocol types
+- `LoginCredentials.password` in the SDK wrapper
+- `Session.pin` held in service state
+- `SetPinParams.pin` in protocol types
+- `PromptResponse.credential` from prompt subprocess
+- Local variables from `rpassword::prompt_password()` in the CLI
+
+The SDK uses `ZeroizingAllocator` internally for key material. Between BitSafe's zeroization of passwords and the SDK's zeroization of keys, the sensitive-data lifecycle is covered.
+
 ### Known gaps
 
-- **No zeroization of passwords/PINs in BitSafe code.** Passwords flow as plain `String` through: CLI → JSON → socket → service → SDK. Each intermediate `String` is not zeroized after use. This includes:
-  - `LoginParams.password` and `UnlockParams.password` in protocol types
-  - `LoginCredentials.password` in the SDK wrapper
-  - `Session.pin` held in service state as `Option<String>`
-  - Local `String` variables from `rpassword::prompt_password()` in the CLI
 - **No macOS memory hardening.** `mlockall` and `PR_SET_DUMPABLE` have no macOS equivalents in the current code. macOS processes may swap sensitive pages.
 
 ### Future improvements
 
-- Use `zeroize::Zeroizing<String>` for all password/PIN fields
 - Investigate macOS `mlock` support (per-page, not process-wide)
 - Consider `seccomp` filtering on Linux to restrict syscalls
 
@@ -59,12 +65,13 @@ We do **not** currently defend against:
 - **Linux**: `SO_PEERCRED` check on every connection — peer UID must match service UID. Connections from other users are rejected.
 - **macOS**: `getpeereid()` check (via tokio's `peer_cred()`) — same UID validation as Linux.
 
-### No IPC encryption
+### Encrypted IPC
 
-- `PlainCodec` only — messages are length-prefixed JSON in cleartext
-- Passwords transit the socket as plaintext JSON strings
-- Socket permissions are the trust boundary (same as ssh-agent)
-- The `Codec` trait is designed for a future `EncryptedCodec` (NaCl boxes or similar)
+- Every connection performs an **X25519 key exchange** followed by **ChaCha20-Poly1305 AEAD** encryption
+- Wire format per message: `[4-byte length][8-byte nonce counter][ciphertext + 16-byte tag]`
+- Ephemeral keypairs generated per connection — no key reuse across sessions
+- Nonce counter prevents replay within a connection
+- Socket permissions (`0600` + UID check) remain the primary trust boundary; encryption provides defense-in-depth against local eavesdropping or socket path attacks
 
 ### Known gaps
 
@@ -173,10 +180,10 @@ After successful login, the service saves encrypted credentials to `~/.local/sha
 
 ## Configuration Security
 
-- Config file at `~/.config/bitsafe/config.toml` — file permissions are not verified by the service
-- No input validation on config values (e.g. negative durations, zero PIN attempts)
-- Config is loaded once at startup — runtime changes require restart
-- Default values are security-reasonable (300s session, 900s auto-lock, 3 PIN attempts)
+- Security parameters (auto-lock timeout, approval duration, PIN max attempts, approval scope, approval requirement) are **hardcoded constants** — not configurable via config file. This prevents config-based downgrade attacks.
+- Only operational settings are configurable: server URL, prompt method (auto/gui/terminal/none), SSH agent enabled/disabled.
+- Config file at `~/.config/bitsafe/config.toml` — file permissions are not verified by the service (acceptable since the file contains no security-critical settings).
+- Config is loaded once at startup — runtime changes require restart.
 
 ## Dependency Security
 
@@ -198,14 +205,14 @@ After successful login, the service saves encrypted credentials to `~/.local/sha
 
 | Priority | Issue | Status |
 |----------|-------|--------|
-| High | No secret zeroization in BitSafe code | Open — use `zeroize::Zeroizing<String>` for passwords and PINs |
+| ~~High~~ | ~~No secret zeroization in BitSafe code~~ | **Fixed** — all password/PIN fields use `Zeroizing<String>` |
 | ~~High~~ | ~~macOS Swift string injection~~ | **Fixed** — `escape_swift()` and `escape_applescript()` sanitize all interpolated strings |
 | ~~High~~ | ~~No macOS peer credential check~~ | **Fixed** — UID check now uses `#[cfg(unix)]` (tokio's `peer_cred()` works on both Linux and macOS) |
 | ~~Medium~~ | ~~Socket fallback path uses PID not UID~~ | **Fixed** — uses `libc::getuid()` on Unix |
 | Medium | Prompt binary PATH fallback | Open — restrict to absolute path or same-directory-as-service only |
 | Medium | Backoff counter resets on service restart | Open — consider persisting attempt count |
 | ~~Medium~~ | ~~Inactivity timer not reset on vault ops~~ | **Fixed** — `touch()` called in `dispatch()` for every session-guarded operation |
-| Medium | `UserKeyState` holds decrypted key in plain HashMap | Open — back with zeroizing container |
+| Medium | `UserKeyState` holds decrypted key in plain HashMap | Open — SDK-managed state, needs upstream zeroizing container |
 | Low | Config file permissions not checked | Open — warn if config is world-readable |
 | Low | PIN length leaked via timing | Accepted — acceptable for 4-6 digit PINs per design decision |
 | Low | mlockall failure is non-fatal | Open — consider failing hard if memory hardening is configured as required |
