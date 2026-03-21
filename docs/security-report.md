@@ -1,22 +1,37 @@
 # Grimoire Security Audit Report
 
-**Date**: 2026-03-20
+**Date**: 2026-03-21
 **Scope**: Full codebase audit — all crates, native prompt binaries, dependencies, build configuration
 **Methodology**: Manual code review with threat-model-driven analysis across attack scenarios
+**Previous audit**: 2026-03-20 (see git history for diff)
 
 ---
 
 ## Executive Summary
 
-Grimoire is a single-user password manager daemon with a Unix socket IPC model analogous to `ssh-agent`. The architecture is sound: cryptographic operations are delegated to the battle-tested Bitwarden SDK, the IPC trust boundary is enforced by OS-level socket permissions and peer credential checks, and the scoped access approval system provides meaningful defense against remote code execution attacks.
+Grimoire is a single-user password manager daemon with a Unix socket IPC model analogous to `ssh-agent`. This holds the keys to the kingdom — compromise means every password, SSH key, and TOTP seed the user has.
 
-This audit identifies **3 critical findings**, **6 high-severity findings**, and **9 medium-severity findings**. The most impactful issues are:
+Since the last audit (2026-03-20), significant improvements have been made:
 
-1. **Password re-verification bypass** — the master password fallback in session re-verification accepts any password without validating it
-2. **No secret zeroization** — passwords, PINs, and decrypted user keys persist in memory as plain `String` until garbage collection
-3. **No connection limits or timeouts** — the service is vulnerable to resource exhaustion via slow clients or connection flooding
+**Fixed from previous audit:**
+- **C1/C2 (Password re-verification bypass)**: Eliminated entirely. Access approval now verifies passwords against the server (`approval.rs:81-96`). A prompt binary that returns a fake password is rejected.
+- **H6 (Config-based security downgrade)**: Security parameters are now hardcoded constants in `config.rs:4-16` — `AUTO_LOCK_SECONDS`, `PIN_MAX_ATTEMPTS`, `APPROVAL_SECONDS` cannot be overridden via config file. Config only controls operational settings (server URL, prompt method, SSH agent enabled).
+- **M1 (Missing `deny_unknown_fields`)**: All `RequestParams` variant structs now have `#[serde(deny_unknown_fields)]` (`request.rs:42-140`).
+- **H1 (Partial — Secret zeroization)**: Password and PIN fields across the protocol and state layers now use `Zeroizing<String>`. Token store uses `Zeroizing<String>`. Debug impls redact secrets.
+- **IPC encryption added**: X25519 key exchange + ChaCha20-Poly1305 AEAD with directional keys, replay protection, and monotonic nonce counters. This is defense-in-depth — socket permissions remain the primary trust boundary.
 
-The codebase demonstrates strong fundamentals: zero `unwrap()`/`expect()` calls, zero `unsafe` outside justified memory hardening, and clean error propagation throughout. The primary gaps are in operational hardening and memory hygiene.
+**New since last audit:**
+- Scoped access approval refactored into shared `approval.rs` module used by both JSON-RPC and SSH agent paths
+- RSA SSH key signing support added
+- `grimoire authorize` command for headless sessions
+- CI release pipeline with cosign signing
+
+This audit identifies **2 critical findings**, **5 high-severity findings**, and **10 medium-severity findings**. The most impactful issues are:
+
+1. **SSH private key material not zeroized** — Ed25519/RSA private keys persist on the heap after signing
+2. **No connection limits or timeouts** — the service remains vulnerable to resource exhaustion
+3. **Password crosses to plain `String` at the SDK boundary** — breaks the zeroization chain for the most sensitive credential
+4. **Backoff counter resets on service restart** — enabling unlimited password guessing with periodic restarts
 
 ---
 
@@ -37,216 +52,255 @@ Each finding is evaluated against these scenarios:
 
 ## Critical Findings
 
-### C1: Password re-verification accepts any password
+### C1: SSH private key not zeroized after signing
 
-**Location**: `crates/grimoire-service/src/session.rs:258-265`
-**Scenarios**: S1, S2, S3
+**Location**: `crates/grimoire-sdk/src/ssh.rs:65-68`, `ssh.rs:85-114`
+**Scenarios**: S3, S6
 
-When a session expires and the user falls through biometric and PIN to the master password fallback, the code accepts *any* password without validation:
-
-```rust
-// session.rs:258-265
-match prompt::prompt_password(&prompt_method).await? {
-    Some(_password) => {
-        // Already unlocked, just refresh the session
-        let mut s = state.write().await;
-        s.refresh_session();
-        Ok(true)
-    }
-    None => Ok(false),
-}
-```
-
-The `_password` is captured but never verified against the master password. Any non-empty response from the prompt refreshes the session.
-
-**Impact**: Session re-verification via master password provides no actual security. The only thing gating access is the GUI prompt dialog — proving physical presence, not knowledge. This is acceptable *only* if the design intent is "prove the human is at the keyboard". If so, this should be explicitly documented as a presence check, not a password check. If the intent is password verification, this must actually verify.
-
-**Recommendation**: Either:
-- (a) Verify the password by calling `sdk.auth().unlock(password, login_state)` (same as the unlock flow), or
-- (b) Rename this to `prompt_presence_check()` and document that it only proves physical presence, not password knowledge. Remove the password field from the prompt response entirely in this flow.
-
-Option (b) is actually the more honest design — re-deriving keys from the master password on every session expiry would be slow and annoying. The real security comes from the GUI prompt requiring physical interaction. But the current code is deceptive: it looks like it's checking a password when it isn't.
-
-### C2: Access approval password fallback has the same bypass
-
-**Location**: `crates/grimoire-service/src/session.rs:154-158`
-**Scenarios**: S1, S2
-
-The scoped access approval also falls back to a password prompt that accepts any input:
+When signing with an SSH key, the parsed `ssh_key::PrivateKey` is held as a local variable and dropped without zeroization:
 
 ```rust
-// session.rs:154-158
-match prompt::prompt_password(&prompt_method).await {
-    Ok(Some(_)) => true, // User proved presence
-    _ => false,
-}
+// ssh.rs:65-68
+let private_key = ssh_key::PrivateKey::from_openssh(&ssh_key_view.private_key)?;
+sign_with_key(&private_key, data, flags)
+// private_key dropped here — NOT zeroized
 ```
 
-Same issue as C1. A prompt binary that writes `{"status":"ok","credential":"anything"}` to stdout grants access approval. The comment says "User proved presence" which suggests this is intentional as a presence check — but it's indistinguishable from a password check to the user and to security reviewers.
+Inside `sign_with_key`, the situation is worse:
 
-**Recommendation**: Same as C1.
+```rust
+// ssh.rs:85 (Ed25519)
+let signing_key = SigningKey::from_bytes(&kp.private.to_bytes());
+// kp.private.to_bytes() creates a temporary [u8; 32] with raw private key bytes
+// SigningKey is not wrapped in Zeroizing
+```
 
-### C3: Prompt binary is fully trusted with no integrity verification
+```rust
+// ssh.rs:96-102 (RSA)
+let d = BigUint::from_bytes_be(kp.private().d().as_bytes());
+let p = BigUint::from_bytes_be(kp.private().p().as_bytes());
+let q = BigUint::from_bytes_be(kp.private().q().as_bytes());
+// RSA private factors as plain BigUint — not zeroized on drop
+```
 
-**Location**: `crates/grimoire-service/src/prompt.rs:16-53`
+**Why this is critical for a password manager**: SSH keys stored in Grimoire are often the most operationally sensitive credentials a user has — they grant access to production servers, cloud infrastructure, and code signing. After every SSH signing operation, the full private key material persists in freed heap memory until overwritten by unrelated allocations. A memory dump (core dump, swap, hibernation, or a same-user ptrace) captured at any point after signing reveals the raw private key.
+
+The `ssh_key` crate's `PrivateKey` type *does* implement `Zeroize`. The fix is wrapping it in `Zeroizing<>`. The `ed25519_dalek::SigningKey` and `rsa::RsaPrivateKey` also implement `Zeroize` and can be wrapped.
+
+**Recommendation**:
+1. Wrap `private_key` in `Zeroizing<ssh_key::PrivateKey>` at `ssh.rs:65`
+2. Wrap `signing_key` in `Zeroizing<SigningKey>` at `ssh.rs:85`
+3. For RSA: wrap `RsaPrivateKey` in `Zeroizing<>` at `ssh.rs:102`
+4. Explicitly zeroize the intermediate `BigUint` values for RSA (d, p, q)
+
+### C2: Prompt binary discovered via PATH — master password interception
+
+**Location**: `crates/grimoire-service/src/prompt.rs:43-57`
 **Scenarios**: S1, S4
 
-The service trusts whatever binary it finds as `grimoire-prompt` without any integrity check. The discovery chain:
+The service trusts whatever binary it finds as `grimoire-prompt` without integrity verification. The discovery chain:
 
 1. Native binary next to `current_exe()` — relatively safe
 2. Generic binary next to `current_exe()` — relatively safe
 3. `which` lookup for native binary — **PATH-dependent**
 4. Bare `"grimoire-prompt"` — **PATH-dependent**
 
-An attacker who can place a binary earlier in `$PATH` (common in S1 — many dev tools prepend to PATH) can intercept all password prompts. The malicious binary would:
-- Receive the user's master password in the clear
-- Return it to the service (so the user doesn't notice)
-- Exfiltrate it
+```rust
+// prompt.rs:43-56
+if !native_name.is_empty() {
+    if let Ok(output) = std::process::Command::new("which").arg(native_name).output() {
+        if output.status.success() {
+            return native_name.into();
+        }
+    }
+}
+"grimoire-prompt".into()  // Falls back to bare name — resolved via PATH at exec time
+```
 
-**Why this is critical**: This is the master password entry point. Unlike the IPC channel (which is protected by socket permissions), the prompt binary is discovered via PATH which is user-controlled and commonly manipulated.
+An attacker who can place a binary earlier in `$PATH` (trivial in S1 — many dev tools prepend to PATH) can intercept the master password. While password-based approval now verifies against the server (`approval.rs:81-96`), the attacker still captures the plaintext master password before it is hashed. The biometric flow (`approval.rs:40-44`) trusts the prompt binary completely — a malicious binary returning `{"status":"verified"}` grants vault access without any server verification.
+
+**Why this is critical**: Unlike the IPC channel (protected by socket permissions + encryption), the prompt binary is discovered via PATH which is user-controlled and routinely manipulated by development tools. A malicious `grimoire-prompt-linux` in `~/.local/bin/` or `~/.npm-global/bin/` intercepts every password entry.
 
 **Recommendation**:
-1. **Remove the PATH fallback entirely.** Only look for prompt binaries adjacent to `current_exe()`. If not found, fail with a clear error message telling the user to install properly.
-2. **Verify binary ownership and permissions** before execution: binary must be owned by root or the current user, and must not be world-writable.
-3. Long-term: consider code signing verification on macOS (`codesign --verify`) and checking that the binary is in a trusted location on Linux (e.g., `/usr/bin`, `/usr/local/bin`, or next to service).
+1. **Remove the PATH fallback entirely.** Only look for prompt binaries adjacent to `current_exe()`. If not found, fail with a clear error.
+2. **Verify binary ownership and permissions**: binary must be owned by root or the current user, and must not be world-writable.
+3. If PATH discovery is retained for development convenience, at minimum verify the binary's owner and permissions before execution.
 
 ---
 
 ## High Findings
 
-### H1: No secret zeroization in the Grimoire layer
+### H1: Password `String` copy at the SDK boundary breaks zeroization chain
 
-**Location**: Throughout all crates
+**Location**: `crates/grimoire-sdk/src/auth.rs:173`, `auth.rs:112`, `auth.rs:142`
 **Scenarios**: S3, S6
 
-Passwords and PINs flow as plain `String` through the entire stack:
-- `LoginParams.password` / `UnlockParams.password` — protocol types
-- `LoginCredentials.password` — SDK wrapper
-- `Session.pin` — held in service state as `Option<String>`
-- `rpassword::prompt_password()` return value — CLI
-- JSON-encoded passwords in IPC messages — codec layer
+Passwords are properly `Zeroizing<String>` through the protocol and state layers. But at the SDK boundary, they are converted to plain `String`:
 
-The SDK uses `ZeroizingAllocator` internally for key material, but all data flowing through Grimoire code is not zeroized. This means passwords persist in freed heap memory until overwritten by subsequent allocations.
+```rust
+// auth.rs:173 — inside InitUserCryptoRequest
+method: InitUserCryptoMethod::MasterPasswordUnlock {
+    password: password.to_string(),  // Plain String — NOT zeroized on drop
+```
 
-The most sensitive instance is `UserKeyState` in `crates/grimoire-sdk/src/state.rs:14` — the decrypted user key stored as a base64 `String` in a `HashMap`. This key can decrypt the entire vault.
+```rust
+// auth.rs:112, 142 — master password hash
+let password_hash = master_auth.master_password_authentication_hash.to_string();
+```
 
-**Impact**: A memory dump (core dump, swap file, hibernation image, cold boot attack) can recover passwords and vault keys. On macOS, where there is no `mlockall`, pages containing passwords can be swapped to disk at any time.
+The SDK's `ZeroizingAllocator` partially mitigates this (it zeros memory when the allocator frees it), but `password.to_string()` allocates through the standard allocator, creating an unprotected copy. Additionally, `state.rs:233` takes `password: &str`, and `state.rs:330` takes `password: &str`, meaning the `Zeroizing` wrapper is stripped at the function boundary.
 
-**Recommendation**: Use `zeroize::Zeroizing<String>` for all password and PIN fields. For the `InMemoryRepository` backing `UserKeyState`, implement `Drop` with explicit `zeroize()` on the HashMap values. This is the single highest-value security improvement available.
+**Impact**: The master password — the single credential protecting the entire vault — persists as a plain `String` in freed heap memory. This is the highest-value target for a memory extraction attack.
 
-### H2: No connection limits, rate limiting, or read timeouts on the Unix socket
+**Recommendation**: Accept `Zeroizing<String>` through the full call chain to the SDK. Where the SDK requires `String`, document this as a known gap and minimize the lifetime of the copy. Use `Zeroizing::new(password.to_string())` where the SDK takes ownership, so the clone is at least tracked.
 
-**Location**: `crates/grimoire-service/src/server.rs:76-115`, `crates/grimoire-protocol/src/codec.rs:62-80`
+### H2: No connection limits, timeouts, or rate limiting on the Unix socket
+
+**Location**: `crates/grimoire-service/src/server.rs:78-130`, `crates/grimoire-service/src/session.rs:19-55`
 **Scenarios**: S1, S2
 
 The accept loop spawns an unbounded number of tokio tasks with no:
 - Maximum connection count
 - Per-connection read/write timeout
+- Handshake timeout
 - Rate limiting on RPC calls
 - Per-connection memory quota
 
+```rust
+// server.rs:116-118 — no limit on spawned tasks
+let client_state = shared_state.clone();
+tokio::spawn(async move {
+    session::handle_client(stream, client_state, peer_pid).await;
+});
+```
+
+```rust
+// session.rs:35-54 — read loop with no idle timeout
+loop {
+    let request: Request = match read_message(&mut reader, &codec).await {
+        // Blocks indefinitely waiting for next message
+```
+
+The handshake (`session.rs:23`) also has no timeout — a client that sends partial data blocks the handler forever.
+
 A malicious same-user process can:
-1. **Connection flood**: Open thousands of connections, each spawning a task and allocating buffers
-2. **Slow client attack**: Open a connection and send data 1 byte/second — `read_exact()` blocks indefinitely, keeping the task alive
+1. **Connection flood**: Open thousands of connections, each triggering X25519 (CPU) + task allocation (memory)
+2. **Slow client**: Connect and send 1 byte/second — `read_exact()` blocks indefinitely
 3. **Memory exhaustion**: Send a valid 4-byte length prefix for a 16 MiB message on each of many connections — `vec![0u8; len as usize]` allocates immediately
-4. **Lock starvation**: Flood `vault.list` requests to hold read locks continuously, preventing auto-lock (write lock) from ever acquiring
+4. **Lock starvation**: Flood `vault.list` requests to hold read locks continuously
 
-**Impact**: Denial of service against the vault service. An attacker can prevent legitimate use of the password manager.
-
-**Recommendation**:
-1. Add `tokio::time::timeout()` wrapping `read_exact()` calls — 30 seconds is reasonable
-2. Limit concurrent connections (e.g., 64 max) with a semaphore
-3. Reduce `MAX_MESSAGE_SIZE` from 16 MiB to 1 MiB — vault payloads are JSON summaries, not bulk data
-4. Add per-connection request rate limiting (e.g., 100 req/s)
-
-### H3: Memory hardening is non-fatal and absent on macOS
-
-**Location**: `crates/grimoire-service/src/main.rs:34-46`
-**Scenarios**: S3, S6
-
-`mlockall` and `PR_SET_DUMPABLE` failures are logged as warnings and execution continues. On macOS, no memory hardening is attempted at all.
-
-**Why this matters**: The vault service holds decrypted key material in memory. Without `mlockall`, the OS can swap these pages to disk, where they persist after process exit. Without `PR_SET_DUMPABLE(0)`, any same-user process can `ptrace` and read memory.
-
-**Current behavior**:
-- Linux: warning log if `mlockall` fails (e.g., `RLIMIT_MEMLOCK` too low), continues with unprotected memory
-- macOS: no attempt at all
+**Impact**: Denial of service against the vault service. The user cannot access their passwords.
 
 **Recommendation**:
-1. **Linux**: Make `mlockall` failure fatal by default, with a `[security] allow_insecure_memory = false` config option to allow override in constrained environments (containers, low-rlimit systems). This matches GnuPG's approach.
-2. **macOS**: Use `mlock()` on specific pages (per-allocation, not process-wide). macOS supports `mlock` for individual ranges. Alternatively, use the Security framework's `SecureEnclave` for key storage.
-3. **macOS**: Use `ptrace(PT_DENY_ATTACH, 0, 0, 0)` to prevent debugger attachment (same mechanism used by Apple's security daemon).
+1. Add `tokio::time::timeout(Duration::from_secs(30), ...)` wrapping `read_message` calls and the handshake
+2. Limit concurrent connections with a `tokio::sync::Semaphore` (e.g., 64 max)
+3. Reduce `MAX_MESSAGE_SIZE` from 16 MiB to 1 MiB — vault payloads are JSON summaries
+4. Add per-connection idle timeout (60s of no messages → disconnect)
 
-### H4: Backoff counter resets on service restart
+### H3: Backoff counter resets on service restart
 
-**Location**: `crates/grimoire-service/src/state.rs:116,149`
+**Location**: `crates/grimoire-service/src/state.rs:103-104,124-125`
 **Scenarios**: S1, S2, S3
 
-`master_password_attempts` and `last_password_attempt` are in-memory fields initialized to `0`/`None` on startup. An attacker who can restart the service (e.g., `kill` + wait for systemd restart) gets unlimited password attempts with no backoff.
+`master_password_attempts` and `last_password_attempt` are in-memory fields initialized to `0`/`None` on every startup:
 
-On Linux with the systemd unit generated by `grimoire service install`, the service has `Restart=on-failure` with `RestartSec=5`. An attacker can:
-1. Try 2 passwords (no backoff on first two)
-2. Kill the service (`SIGKILL` from same-user process)
-3. Wait 5 seconds for restart
+```rust
+// state.rs:124-125 (in ServiceState::new)
+master_password_attempts: 0,
+last_password_attempt: None,
+```
+
+An attacker who can restart the service (e.g., `kill -9` from same-user) gets unlimited password attempts with no backoff. With `Restart=on-failure` in the systemd unit:
+1. Try 2 passwords (no backoff on first)
+2. Kill the service
+3. Wait for restart (5s default)
 4. Repeat — ~24 guesses/minute with zero backoff
 
-**Recommendation**: Persist the attempt counter and last attempt timestamp to a file alongside `login.json`. Load on startup. Clear on successful authentication. Use a separate file with `0600` permissions. This is simple and eliminates the restart bypass.
+For a 4-character numeric PIN, 10,000 combinations ÷ 2 per cycle = ~5,000 cycles × 5s = ~7 hours for full enumeration (if the attacker can also bypass PIN lockout via restart). More practically, the master password backoff is what's being bypassed — the PIN lockout is enforced correctly within a single process lifetime.
 
-### H5: PIN has no delay between attempts
+**Recommendation**: Persist the attempt counter and last attempt timestamp to a file (e.g., `~/.local/share/grimoire/backoff.json` with mode 0600). Load on startup. Clear only on successful authentication.
 
-**Location**: `crates/grimoire-service/src/state.rs:340-358`
-**Scenarios**: S1, S2
+### H4: Memory hardening is non-fatal and absent on macOS
 
-PINs have a max attempt limit (3) but no delay between attempts. A 4-digit numeric PIN has 10,000 possibilities. With 3 attempts before auto-lock, then an immediate re-unlock (if the attacker has already exfiltrated the master password from a previous prompt binary attack), the attacker gets unlimited batches of 3 PIN attempts.
+**Location**: `crates/grimoire-service/src/main.rs:37-51`
+**Scenarios**: S3, S6
 
-Even without knowing the master password, the auto-lock-then-GUI-prompt cycle means the attacker can keep triggering PIN prompts that the legitimate user might respond to (social engineering: "Grimoire keeps asking me to re-enter my password").
+`mlockall` and `PR_SET_DUMPABLE` failures are logged as warnings and execution continues:
 
-**Recommendation**: Add a 1-second delay between PIN attempts. After the 3rd failure (auto-lock), persist the failed count so re-unlock doesn't reset PIN attempts. Require successful master password authentication to reset the PIN attempt counter.
+```rust
+// main.rs:43-44
+if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
+    tracing::warn!("mlockall failed — sensitive data may be swapped to disk");
+}
+```
 
-### H6: Config file not validated for permissions or content bounds
+On macOS, no memory hardening is attempted at all (`#[cfg(target_os = "linux")]` guard).
 
-**Location**: `crates/grimoire-common/src/config.rs:198-210`
-**Scenarios**: S1, S2
-
-The config file is loaded without checking:
-1. **File permissions**: A world-readable config leaks server URL and security settings. A world-writable config allows an attacker to disable security features.
-2. **Content bounds**: No validation on any values. An attacker who can write to the config can set:
-   - `require_approval = false` — disables access approval entirely
-   - `pin_max_attempts = 999999999` — effectively disables PIN lockout
-   - `duration_seconds = 999999999` — session never expires
-   - `auto_lock_seconds = 0` — disables auto-lock
-   - `prompt.method = "none"` — disables interactive prompting
+**Why this matters for a password manager**: The vault service holds decrypted key material, master password hashes, and SSH private keys in memory. Without `mlockall`, the OS can swap these pages to disk where they persist after process exit. Without `PR_SET_DUMPABLE(0)`, any same-user process can `ptrace` and read memory. On macOS, where there is no `mlockall`, pages containing the entire vault can be swapped at any time.
 
 **Recommendation**:
-1. **Check permissions on load**: warn and refuse to start if config is group/world-writable (`mode & 0o022 != 0`)
-2. **Validate bounds**: reject configs where `duration_seconds > 3600`, `auto_lock_seconds > 86400`, `pin_max_attempts > 10`, etc.
-3. **Log the effective security config** at startup so the user can verify
+1. **Linux**: Make `mlockall` failure fatal by default, with an explicit opt-out flag (`--allow-insecure-memory`) for constrained environments
+2. **macOS**: Use `mlock()` on specific allocations. Use `ptrace(PT_DENY_ATTACH, 0, 0, 0)` to prevent debugger attachment.
+3. Both platforms: log the effective memory hardening status at startup so the user knows their protection level
+
+### H5: KDF parameters from server accepted without upper bounds
+
+**Location**: `crates/grimoire-sdk/src/auth.rs:254-293`
+**Scenarios**: S5
+
+The prelogin response provides KDF parameters used directly for key derivation:
+
+```rust
+// auth.rs:258-261
+let iterations = data["kdfIterations"]
+    .as_i64()
+    .or_else(|| data["KdfIterations"].as_i64())
+    .unwrap_or(600000);
+```
+
+No upper bound is checked. A compromised or malicious server can specify:
+- `iterations: 4294967295` for PBKDF2 → CPU exhaustion (minutes to hours of computation)
+- `memory: 4294967295` for Argon2 → attempts to allocate ~4 GiB → OOM kill or swap thrashing
+- `parallelism: 4294967295` for Argon2 → spawns billions of threads → system hang
+
+**Impact**: A network attacker who can MITM the prelogin request (TLS-stripping, DNS hijacking, or compromised CA) or a malicious Vaultwarden instance can deny service or force excessive resource consumption. This also applies if `login.json` is tampered to point at a malicious server (see M2).
+
+**Recommendation**: Add reasonable upper bounds before passing to the SDK:
+- PBKDF2 iterations: max 2,000,000
+- Argon2 memory: max 4,096 MiB
+- Argon2 parallelism: max 16
+- Argon2 iterations: max 20
 
 ---
 
 ## Medium Findings
 
-### M1: `VaultGetParams` and `SshSignParams` missing `#[serde(deny_unknown_fields)]`
+### M1: Background sync holds read lock during HTTP call
 
-**Location**: `crates/grimoire-protocol/src/request.rs`
-**Scenarios**: Protocol confusion
+**Location**: `crates/grimoire-service/src/sync_worker.rs:39-48`
+**Scenarios**: Operational
 
-All other parameter structs have `deny_unknown_fields` to prevent the `#[serde(untagged)]` enum from greedily matching. These two are missing it. While the practical impact is low (extra fields are silently ignored), this inconsistency could cause deserialization to match the wrong variant if new similar-shaped structs are added.
+```rust
+// sync_worker.rs:39-48
+let sync_result = {
+    let s = state.read().await;
+    // ... holds read lock during entire HTTP call
+    sdk.sync().sync(server_url).await  // Network call — could take seconds
+};
+```
 
-**Recommendation**: Add `#[serde(deny_unknown_fields)]` to both structs for consistency with the rest of the protocol.
+While the read lock is held, no state mutations (lock, logout, set PIN) can proceed. If the server is slow or unreachable, this blocks all state mutations for the HTTP timeout duration (reqwest default: 30s).
+
+**Recommendation**: Extract `sdk` and `server_url` from the read lock, drop the lock, then sync. The SDK is `Arc<Mutex<>>` so it's safe to use without the state lock.
 
 ### M2: Persistent login state file has no integrity protection
 
-**Location**: `crates/grimoire-sdk/src/persist.rs`
+**Location**: `crates/grimoire-sdk/src/persist.rs:58-74`
 **Scenarios**: S2
 
-`login.json` stores email and server URL. A same-user attacker can modify this file to point at a malicious server. On next unlock, the service would send the master password hash to the attacker's server.
+`login.json` stores email and server URL with mode 0600 but no integrity check. A same-user attacker can modify `server_url` to point at a malicious server. On next unlock, the service sends the master password hash to the attacker's server.
 
-The file is protected by `0600` permissions, but a same-user process can read and write it.
-
-**Impact**: Master password exfiltration via server URL redirection. The user would see a login failure (attacker's server doesn't have their vault), but the password hash has already been sent.
-
-**Recommendation**: Add an HMAC over the file contents, keyed with a per-installation random secret stored in a separate file. This detects tampering — the service refuses to load a file with an invalid HMAC. This doesn't prevent a same-user attacker from reading the file, but it prevents the server URL redirect attack.
+**Recommendation**: Add an HMAC over the file contents keyed with a per-installation random secret stored in a separate file. This detects tampering — the service refuses to load a modified file.
 
 ### M3: `/proc/<pid>/stat` TOCTOU in session leader resolution
 
@@ -255,99 +309,138 @@ The file is protected by `0600` permissions, but a same-user process can read an
 
 The session leader PID is read from `/proc/<pid>/stat` at connection time. Between read and use, the PID could be recycled. If an attacker's process gets the same PID as a previously approved session leader, it inherits the approval grant.
 
-**Impact**: Low probability (PID recycling is rare in the approval window), but the consequence is full vault access without re-approval.
-
-**Recommendation**: Store `(pid, start_time)` pairs in the approval cache. Read the process start time from `/proc/<pid>/stat` field 22 (`starttime`) and verify it matches when checking the cache. This eliminates PID reuse as an attack vector.
+**Recommendation**: Store `(pid, start_time)` pairs in the approval cache. Read `starttime` from `/proc/<pid>/stat` field 22 and verify on cache lookup.
 
 ### M4: Error messages leak vault metadata
 
-**Location**: `crates/grimoire-service/src/session.rs:592-608`
+**Location**: `crates/grimoire-service/src/session.rs:550-564`
 **Scenarios**: S1, S2
 
 Vault reference resolution errors include item names and counts:
 - `"No item named 'GitHub API'"` — confirms the item does not exist
 - `"Ambiguous name 'Git' matches 3 items"` — reveals count of matching items
-- `"Ambiguous ID prefix '64b1' matches 2 items"` — confirms items exist with that prefix
 
-**Recommendation**: Return generic errors: `"Reference resolution failed"`. Log the detailed error server-side for debugging.
+**Recommendation**: Return generic errors: `"Reference resolution failed"`. Log details server-side.
 
-### M5: SSH private key not zeroized after signing
+### M5: SSH agent socket lacks UID peer verification
 
-**Location**: `crates/grimoire-sdk/src/ssh.rs:76-79`
-**Scenarios**: S3, S6
-
-After parsing the SSH private key from OpenSSH format and signing, the `PrivateKey` and `SigningKey` objects are dropped without zeroization:
-
-```rust
-let private_key = ssh_key::PrivateKey::from_openssh(&ssh_key_view.private_key)?;
-sign_with_key(&private_key, data, flags)
-// private_key dropped here — not zeroized
-```
-
-The `ed25519_dalek::SigningKey` and `rsa::RsaPrivateKey` do not implement `Zeroize`. The private key bytes persist on the stack and heap after the function returns.
-
-**Recommendation**: This is harder to fix than the `String` zeroization because the crypto types don't implement `Zeroize`. Short-term: document as a known gap. Long-term: wrap the signing operation in a dedicated function that allocates key material in a `mlock`'d region and manually zeros it after use. Consider using `ssh-key`'s own signing API if it handles key lifecycle more carefully.
-
-### M6: Service log file on macOS is world-readable
-
-**Location**: `crates/grimoire-cli/src/main.rs:327-328`
+**Location**: `crates/grimoire-service/src/ssh_agent.rs:28-43`, `server.rs:69-74`
 **Scenarios**: S2
 
-The macOS LaunchAgent plist writes stdout/stderr to `/tmp/grimoire-service.log`:
+The main JSON-RPC socket has an explicit UID check (`server.rs:89-100`), but the SSH agent socket delegates connection handling to `ssh_agent_lib::agent::listen()` which does not perform UID verification. The SSH agent relies solely on socket filesystem permissions (0600) for access control.
 
-```xml
-<key>StandardOutPath</key>
-<string>/tmp/grimoire-service.log</string>
-<key>StandardErrorPath</key>
-<string>/tmp/grimoire-service.log</string>
-```
+While socket permissions are typically sufficient, the main socket has defense-in-depth via an explicit UID check. The SSH agent socket should have parity.
 
-Files created in `/tmp` inherit the umask of the creating process. If the umask allows it (common default: `0022`), the log file is world-readable. Service logs include:
-- Email address (logged at startup)
-- Server URL
-- Connection details and peer PIDs
-- Sync status
+**Recommendation**: Either verify UID inside `SshAgentHandler::new_session()` or wrap the listener with a UID-checking layer before passing to the SSH agent library.
 
-**Recommendation**: Use `~/Library/Logs/grimoire-service.log` instead of `/tmp`. Alternatively, set `StandardOutPath` to a directory with restricted permissions.
+### M6: `tokio` uses `features = ["full"]` — unnecessarily wide attack surface
 
-### M7: Background sync happens over a read lock that blocks state mutations
-
-**Location**: `crates/grimoire-service/src/sync_worker.rs:46-55`
-**Scenarios**: Operational
-
-Background sync holds a read lock on `state` for the entire duration of the HTTP request to the server:
-
-```rust
-let sync_result = {
-    let s = state.read().await;
-    // ... holds read lock during HTTP call
-    sdk.sync().sync(server_url).await  // Network call — could take seconds
-};
-```
-
-While the read lock is held, no state mutations (lock, logout, set PIN) can proceed. If the server is slow or unreachable, this can block state mutations for the entire HTTP timeout.
-
-**Recommendation**: Extract `sdk` and `server_url` from the read lock, drop the lock, then perform the sync without holding any lock. The SDK client is behind `Arc<Mutex<>>` so it's safe to use without the state lock.
-
-### M8: `tokio` uses `features = ["full"]` — unnecessarily wide attack surface
-
-**Location**: `Cargo.toml` workspace dependencies
+**Location**: `Cargo.toml:39`
 **Scenarios**: S4
 
-`tokio = "full"` enables ~40 feature flags including `process`, `fs`, `io-std`, and others not needed by the service. Each feature pulls in additional code and increases the binary size and attack surface.
+`tokio = "full"` enables ~40 feature flags including `process`, `fs`, `io-std`, and others not needed by the service. Each feature pulls in additional code.
 
-**Recommendation**: Replace with explicit features: `["macros", "rt-multi-thread", "time", "net", "io-util", "signal", "sync"]`. This cuts unused code paths and reduces transitive dependency surface.
+**Recommendation**: Replace with explicit features: `["macros", "rt-multi-thread", "time", "net", "io-util", "signal", "sync"]`.
 
-### M9: Yanked `digest 0.11.1` dependency
+### M7: 16 MiB message size limit is excessive
 
-**Location**: `Cargo.lock`
+**Location**: `crates/grimoire-protocol/src/codec.rs:20`
+**Scenarios**: S1, S2
+
+`MAX_MESSAGE_SIZE` is 16 MiB. A typical vault response with thousands of entries is well under 1 MiB. Combined with no connection limit (H2), an attacker can open many connections and allocate 16 MiB on each.
+
+**Recommendation**: Reduce to 1 MiB or 4 MiB.
+
+### M8: No `cargo-audit` or `cargo-deny` in CI
+
+**Location**: `.github/workflows/ci.yml`
 **Scenarios**: S4
 
-The SDK requires `digest 0.11.1` which has been yanked from crates.io. While Cargo.lock preserves the version, a fresh `cargo update` or CI build without a cached Cargo.lock may fail to resolve this dependency.
+524 transitive dependencies are never checked for known vulnerabilities. This is a password manager — every dependency is trusted with vault secrets. The `digest 0.11.1` crate is yanked, and 39 pre-release crate versions are in the lockfile.
 
-**Impact**: Build breakage, not a runtime vulnerability. However, yanked crates are typically yanked due to bugs or security issues — the reason should be investigated.
+**Recommendation**: Add `cargo audit` to the CI pipeline. Consider `cargo-deny` for license and advisory checking. Investigate why `digest 0.11.1` was yanked.
 
-**Recommendation**: Investigate why `digest 0.11.1` was yanked. If it's a security fix, assess impact on Grimoire. Document the investigation in `UPGRADING.md`. Consider whether a newer SDK revision resolves this.
+### M9: CI actions not pinned to commit SHAs
+
+**Location**: `.github/workflows/*.yml`
+**Scenarios**: S4
+
+GitHub Actions are referenced by tag (`actions/checkout@v4`, `sigstore/cosign-installer@v3`) rather than commit SHA. A compromised action repository could inject malicious code into the release pipeline, which signs binaries with cosign.
+
+**Recommendation**: Pin all third-party actions to full commit SHAs. Use Dependabot or Renovate to keep them updated.
+
+### M10: Config file permissions not checked
+
+**Location**: `crates/grimoire-common/src/config.rs:100-112`
+**Scenarios**: S2
+
+The config file is loaded without checking ownership or permissions. While security parameters are hardcoded (not configurable), `server.url` IS configurable and is security-relevant — a malicious server URL redirects the master password hash. `prompt.method = "none"` disables interactive prompting.
+
+**Recommendation**: Warn (or refuse to start) if the config file is group/world-writable (`mode & 0o022 != 0`).
+
+---
+
+## Low Findings
+
+### L1: `$XDG_RUNTIME_DIR` trusted without validation
+
+**Location**: `crates/grimoire-common/src/socket.rs:8-9`
+
+The code trusts `$XDG_RUNTIME_DIR` unconditionally. An attacker who can set this env var could redirect socket connections. Mitigated by: this variable is typically set by the login system and is not user-modifiable in normal configurations.
+
+### L2: `request_identities` in SSH agent returns keys without approval
+
+**Location**: `crates/grimoire-service/src/ssh_agent.rs:55-85`
+
+Listing SSH public keys does not require approval — only signing does. Public keys are not secrets, but key names could leak information about what services the user has keys for.
+
+### L3: Shared secret and derived keys not zeroized in codec
+
+**Location**: `crates/grimoire-protocol/src/codec.rs:89-119`
+
+The `shared_secret: [u8; 32]` passed to `EncryptedCodec::new_client/new_server` and the intermediate `c2s_key`/`s2c_key` arrays from `derive_directional_keys` are stack-allocated and not zeroized when they go out of scope.
+
+### L4: `expect()` in production code
+
+**Location**: `crates/grimoire-sdk/src/lib.rs:55`, `crates/grimoire-protocol/src/codec.rs:77,81,171`
+
+Four `expect()` calls exist in non-test code. The codec ones are for mathematically guaranteed conditions (HKDF output length, checked slice length). The `lib.rs:55` one panics if the data directory cannot be determined — this is a startup precondition but still violates the project's no-panic rule.
+
+### L5: Missing `// SAFETY:` comment on `getsid()`
+
+**Location**: `crates/grimoire-service/src/peer.rs:42`
+
+The `unsafe { libc::getsid(pid as i32) }` block lacks the `// SAFETY:` comment required by project conventions. Functionally correct but inconsistent.
+
+### L6: `TokenResponse` fields are plain `String`
+
+**Location**: `crates/grimoire-sdk/src/auth.rs:297-304`
+
+The `access_token`, `key`, and `private_key` fields in `TokenResponse` are deserialized as plain `String` before being wrapped in `Zeroizing`. The deserialization buffer is not zeroized.
+
+### L7: Duplicate `PIN_MAX_ATTEMPTS` constant
+
+**Location**: `crates/grimoire-common/src/config.rs:14`, `crates/grimoire-prompt/src/pin.rs:2`
+
+`PIN_MAX_ATTEMPTS` is defined in two places. If one is updated without the other, behavior diverges.
+
+### L8: JWT parsed without signature verification
+
+**Location**: `crates/grimoire-sdk/src/auth.rs:220-229`
+
+The JWT from the login response is decoded without verifying its signature to extract the `sub` (user ID) claim. A malicious server could send a JWT with a forged `sub` claim. Practical impact depends on how the SDK uses this user ID internally.
+
+### L9: No HTTP response body size limit
+
+**Location**: `crates/grimoire-sdk/src/auth.rs`, `crates/grimoire-sdk/src/sync.rs`
+
+The `reqwest::Client` is used without configuring a response body size limit. A malicious server could send an extremely large sync response to exhaust memory.
+
+### L10: Server error messages forwarded to client
+
+**Location**: `crates/grimoire-sdk/src/auth.rs:336-343`
+
+Server-provided error messages are propagated into `SdkError::AuthFailed`. A malicious server could inject misleading error text displayed to the user.
 
 ---
 
@@ -357,31 +450,52 @@ These are security properties that are well-implemented and should be preserved:
 
 ### P1: Zero panic paths in production code
 
-No `unwrap()`, `expect()`, `panic!()`, `unimplemented!()`, or `unreachable!()` in any crate except `unreachable!()` in one match arm that genuinely can't be reached (`state.rs:280`). All errors use `Result<T>` propagation. This eliminates panic-based denial of service — **industry-leading error handling discipline**.
+No `unwrap()` or `panic!()` in any crate. The few `expect()` calls are on mathematically guaranteed conditions. All errors use `Result<T>` propagation. This eliminates panic-based denial of service.
 
-### P2: Scoped access approval is genuinely valuable
+### P2: Scoped access approval is mandatory and server-verified
 
-The biometric/PIN approval system gated by session leader PID is an effective defense against S1 (RCE in a terminal session). An attacker who gets shell access can connect to the socket but cannot complete the GUI dialog that appears on the user's display. This is a real security boundary, not theater.
+The approval system (`approval.rs`) is always active, not configurable, and uses a defense-in-depth cascade:
+1. Biometric (requires physical presence at the device)
+2. PIN (3 attempts, then auto-lock)
+3. Master password **verified against the server** (`approval.rs:81-96`) — a malicious prompt binary returning a fake password is rejected
 
-### P3: `exec()` semantics for secret injection
+This is a significant improvement over the previous audit where password approval was not verified.
 
-`grimoire run` uses `execvp()` — the Grimoire process is replaced entirely. No wrapper process lingers with secrets in its memory. No TTY interposition. All resolution errors happen before exec. This is the correct design.
+### P3: Security parameters are hardcoded constants
 
-### P4: Crypto delegation to the SDK
+Auto-lock timeout (900s), PIN max attempts (3), approval duration (300s), and sync interval (300s) are hardcoded in `config.rs:4-16`. The config file cannot override them. A test (`config.rs:163-183`) explicitly verifies that old config sections with security overrides are ignored. This eliminates config-based downgrade attacks identified in the previous audit.
 
-Grimoire never handles raw cryptographic keys. All crypto operations go through the SDK's `PasswordManagerClient`, which uses `ZeroizingAllocator` and `KeyStore` internally. Key derivation, encryption, and decryption are entirely within the SDK. This is a sound trust boundary.
+### P4: Encrypted IPC with replay protection
 
-### P5: Socket peer credential verification
+The X25519 + ChaCha20-Poly1305 codec (`codec.rs:47-194`) provides:
+- Directional keys via HKDF-SHA256 (prevent nonce reuse)
+- Monotonic counter nonces (prevent replay)
+- Ephemeral keys per connection (forward secrecy)
+- Properly documented as unauthenticated (socket permissions are the trust boundary)
 
-The UID check on every connection using `SO_PEERCRED` (Linux) / `getpeereid` (macOS) is correctly implemented. The `#[cfg(unix)]` guard covers both platforms. Connections from other users are immediately rejected. This matches `ssh-agent`'s security model.
+### P5: `exec()` semantics for secret injection
 
-### P6: TOCTOU double-check in auto-lock
+`grimoire run` uses `execvp()` — the Grimoire process is replaced entirely. No wrapper process lingers with secrets in memory.
 
-The auto-lock worker correctly uses a read-check then write-lock-and-recheck pattern, preventing a race where the vault is locked while a legitimate operation is in progress.
+### P6: Crypto delegation to the SDK
 
-### P7: No `unsafe` outside justified memory hardening
+Grimoire never handles raw cryptographic keys for vault operations. All crypto goes through the SDK's `PasswordManagerClient` which uses `ZeroizingAllocator` internally.
 
-The only `unsafe` blocks are `libc::mlockall()`, `libc::prctl()`, `libc::getuid()`, and `libc::getsid()` — all justified FFI calls with no alternatives.
+### P7: Socket peer credential verification
+
+UID check on every connection using `SO_PEERCRED` / `getpeereid`. Connections from other users are immediately rejected.
+
+### P8: TOCTOU double-check in auto-lock
+
+The auto-lock worker (`sync_worker.rs:14-28`) correctly uses a read-check then write-lock-and-recheck pattern.
+
+### P9: No `unsafe` outside justified FFI
+
+Only 4 `unsafe` blocks across the entire codebase: `mlockall()`, `prctl()`, `getuid()`, and `getsid()` — all justified FFI calls with no alternatives. All have `// SAFETY:` comments except `getsid` (noted in L5).
+
+### P10: SDK internal errors sanitized before IPC
+
+`sdk_err_to_rpc()` at `session.rs:682-696` logs detailed errors server-side but returns only `"Internal error"` to the client for `SdkError::Internal`, preventing leakage of filesystem paths and library errors.
 
 ---
 
@@ -392,16 +506,17 @@ The only `unsafe` blocks are `libc::mlockall()`, `libc::prctl()`, `libc::getuid(
 **Attack path**: Malicious npm postinstall script runs as the user in a terminal session.
 
 **Current defenses**:
-- Scoped access approval (P2): attacker can connect to socket but can't approve the GUI dialog
-- Socket UID check: attacker is same user (allowed by design)
+- Scoped access approval (P2): attacker can connect to socket but can't complete the GUI dialog
+- Socket UID check + encrypted IPC (P7, P4): attacker is same UID (allowed by design), but can't tamper with messages
+- Security parameters hardcoded (P3): attacker can't disable approval via config
 
 **Gaps**:
-- If approval is disabled in config (H6), attacker has full vault access
-- Attacker can modify config to disable approval, then restart service (H6 + H4)
-- Attacker can place fake prompt binary in PATH (C3) to capture master password on next unlock
-- No connection rate limiting (H2) — attacker can DoS the vault
+- Attacker can place fake prompt binary in PATH (C2) → captures master password OR bypasses biometric
+- No connection rate limiting (H2) → attacker can DoS the vault
+- Attacker can modify config to set `prompt.method = "none"` or change `server.url` (M10)
+- Vault metadata leaks in error messages (M4)
 
-**Mitigations needed**: C3 (prompt binary hardening), H6 (config validation), H2 (rate limiting)
+**Mitigations needed**: C2 (prompt binary hardening), H2 (rate limiting), M10 (config permissions)
 
 ### Scenario S2: Same-User Lateral Movement
 
@@ -410,27 +525,33 @@ The only `unsafe` blocks are `libc::mlockall()`, `libc::prctl()`, `libc::getuid(
 **Current defenses**:
 - Scoped access approval scoped to terminal session — cron job has different session leader
 - GUI prompt requires physical presence
+- Password approval verified against server (P2)
+- Unknown PIDs get unique monotonic scope keys (`session.rs:64-74`) — no shared key=0 vulnerability
 
 **Gaps**:
-- With `approval_for = "session"` and scope_key = 0 (no peer PID available), approval is always cached at key 0 — any process without a PID gets free access
-- Same gaps as S1 for config modification and prompt binary replacement
+- SSH agent socket lacks UID verification (M5)
+- `login.json` can be modified to redirect to malicious server (M2)
+- Config file can be modified (M10)
+- Backoff counter resets on restart (H3) — attacker can kill+restart service for unlimited password attempts
 
-**Mitigations needed**: Fix the scope_key=0 fallback — if peer PID is unavailable, deny access rather than granting with a shared key.
+**Mitigations needed**: H3 (persistent backoff), M2 (login.json integrity), M5 (SSH agent UID check)
 
 ### Scenario S3: Physical Access
 
 **Attack path**: Attacker at an unlocked laptop.
 
 **Current defenses**:
-- Session timer (300s default) — if expired, requires biometric/PIN/password
-- Auto-lock (900s default) — if expired, requires master password
+- Auto-lock timer (900s) — if expired, requires master password
+- Approval required for every vault operation (P2)
+- Password approval verified against server — entering a wrong password doesn't grant access
 
 **Gaps**:
-- No screen-lock integration — if the user leaves the session unlocked, vault is accessible
-- Re-verification password bypass (C1, C2) — entering any password refreshes the session
-- Cold boot / memory dump — no zeroization (H1), no macOS memory hardening (H3)
+- No screen-lock integration — if within 15-minute window, vault is accessible to any process
+- SSH private keys not zeroized after signing (C1) — memory dump reveals keys
+- Password material at SDK boundary not zeroized (H1) — memory dump reveals master password
+- No macOS memory hardening (H4) — pages can be swapped to disk
 
-**Mitigations needed**: C1/C2 (re-verification bypass), H1 (zeroization), H3 (macOS memory hardening)
+**Mitigations needed**: C1 (SSH key zeroization), H1 (password zeroization), H4 (macOS hardening)
 
 ### Scenario S4: Supply Chain
 
@@ -439,26 +560,32 @@ The only `unsafe` blocks are `libc::mlockall()`, `libc::prctl()`, `libc::getuid(
 **Current defenses**:
 - SDK pinned to specific git revision
 - Cargo.lock committed
-- Rust version pinned to 1.88
+- Rust version pinned
+- Release binaries signed with cosign
 
 **Gaps**:
 - 524 transitive dependencies — large attack surface
-- Pre-release RustCrypto crates (no semver stability guarantees)
-- Yanked `digest 0.11.1` (M9)
-- No `cargo audit` or `cargo-deny` in CI
-- No SBOM generation
+- No `cargo audit` or `cargo-deny` (M8)
+- 39 pre-release crate versions (no stability guarantees)
+- Yanked `digest 0.11.1` — reason uninvestigated
+- CI actions not SHA-pinned (M9)
+- `tokio` full features expand surface (M6)
 
-**Mitigations needed**: Add `cargo audit` to CI, reduce `tokio` features (M8), investigate yanked deps (M9)
+**Mitigations needed**: M6, M8, M9
 
 ### Scenario S5: Network
 
 **Attack path**: MITM between Grimoire and Bitwarden/Vaultwarden server.
 
 **Current defenses**:
-- HTTPS via `reqwest` with `rustls-tls` (no OpenSSL, certificate verification enabled by default)
+- HTTPS via `reqwest` with `rustls-tls` (no OpenSSL)
 - Master password hash sent, not cleartext password
 
-**Assessment**: Well-defended. The `rustls` TLS implementation has an excellent security track record. The master password is never sent in cleartext — only the PBKDF2/Argon2 hash is transmitted. Certificate pinning would add defense-in-depth but is not strictly necessary given proper CA validation.
+**Gaps**:
+- KDF parameters accepted without upper bounds (H5) — malicious server can DoS via excessive params
+- No HTTP response size limit (L9)
+
+**Assessment**: Well-defended. The `rustls` TLS stack has an excellent security record. KDF bounds (H5) are the main gap.
 
 ---
 
@@ -468,58 +595,92 @@ The only `unsafe` blocks are `libc::mlockall()`, `libc::prctl()`, `libc::getuid(
 
 | # | Finding | Effort |
 |---|---------|--------|
-| C1 | Fix password re-verification bypass — either verify or rename to presence check | Small |
-| C2 | Fix access approval password fallback — same as C1 | Small |
-| C3 | Remove PATH fallback for prompt binary discovery | Small |
-| H1 | Add `Zeroizing<String>` for all password/PIN fields | Medium |
-| H2 | Add connection limits and socket read timeouts | Medium |
+| C1 | Wrap SSH private keys in `Zeroizing<>` after signing | Small |
+| C2 | Remove PATH fallback for prompt binary discovery | Small |
+| H2 | Add connection limits and socket read/handshake timeouts | Medium |
+| H3 | Persist backoff counter to disk | Small |
 
 ### Short-term (next release)
 
 | # | Finding | Effort |
 |---|---------|--------|
-| H3 | Make memory hardening failure fatal by default; add macOS `mlock`/`PT_DENY_ATTACH` | Medium |
-| H4 | Persist backoff counter to disk | Small |
-| H5 | Add PIN attempt delay; persist PIN attempt count across lock/unlock | Small |
-| H6 | Validate config file permissions and content bounds | Small |
-| M1 | Add `deny_unknown_fields` to remaining param structs | Trivial |
-| M6 | Fix macOS log file path | Trivial |
-| M8 | Reduce `tokio` features | Trivial |
+| H1 | Pass `Zeroizing<String>` through full SDK boundary | Medium |
+| H4 | Make memory hardening failure fatal; add macOS `mlock`/`PT_DENY_ATTACH` | Medium |
+| H5 | Add upper bounds on KDF parameters from server | Small |
+| M5 | Add UID peer check to SSH agent socket | Small |
+| M7 | Reduce `MAX_MESSAGE_SIZE` to 1 MiB | Trivial |
+| M8 | Add `cargo audit` to CI | Small |
+| M10 | Check config file permissions on load | Small |
 
 ### Medium-term
 
 | # | Finding | Effort |
 |---|---------|--------|
+| M1 | Refactor sync worker to not hold state lock during HTTP calls | Small |
 | M2 | Add HMAC integrity check to `login.json` | Medium |
 | M3 | Include process start time in approval cache key | Small |
 | M4 | Genericize error messages for vault references | Small |
-| M5 | Investigate SSH key zeroization options | Medium |
-| M7 | Refactor sync worker to not hold state lock during HTTP calls | Small |
-| M9 | Investigate yanked `digest` dependency | Small |
-| — | Add `cargo audit` and `cargo-deny` to CI | Small |
-| — | Generate SBOM | Small |
+| M6 | Narrow `tokio` features | Trivial |
+| M9 | Pin CI actions to commit SHAs | Small |
+| L3 | Zeroize shared secret and derived keys in codec | Small |
 
 ### Long-term
 
 | Item | Effort |
 |------|--------|
-| IPC encryption (NaCl box or similar) — defense-in-depth against ptrace | Large |
+| Screen-lock integration (D-Bus on Linux, DistributedNotificationCenter on macOS) | Medium |
 | `seccomp` filter on Linux to restrict syscalls | Medium |
 | Hardware key (FIDO2/WebAuthn) support for unlock | Large |
-| Screen-lock integration (D-Bus on Linux, DistributedNotificationCenter on macOS) | Medium |
 | V2 account (COSE) support | Medium |
+| SBOM generation for releases | Small |
+
+---
+
+## Changes Since Last Audit (2026-03-20)
+
+### Findings Resolved
+
+| Previous ID | Resolution |
+|-------------|-----------|
+| C1 (password re-verification bypass) | **Fixed.** Password approval now verified against server (`approval.rs:81-96`) |
+| C2 (access approval password bypass) | **Fixed.** Same — shared approval flow verifies all password-based approvals |
+| H1 (no secret zeroization) | **Partially fixed.** Protocol and state layers now use `Zeroizing<String>`. SDK boundary still has gaps (now H1). |
+| H6 (config-based security downgrade) | **Fixed.** Security parameters hardcoded as constants. Config cannot override them. |
+| M1 (missing `deny_unknown_fields`) | **Fixed.** All `RequestParams` variant structs now have it. |
+| New | **Added:** Encrypted IPC (X25519 + ChaCha20-Poly1305) |
+| New | **Added:** Shared approval module with biometric → PIN → password cascade |
+| New | **Added:** RSA SSH key signing |
+| New | **Added:** `grimoire authorize` for headless sessions |
+
+### Findings Still Open
+
+| Previous ID | Current ID | Notes |
+|-------------|-----------|-------|
+| C3 (prompt binary PATH) | C2 | Unchanged — PATH fallback still present |
+| H2 (no connection limits) | H2 | Unchanged |
+| H3 (memory hardening) | H4 | Unchanged |
+| H4 (backoff counter reset) | H3 | Unchanged |
+| H5 (PIN no delay) | — | Mitigated: PIN exhaustion now auto-locks vault. Still no delay between attempts within a session. |
+| M2 (login.json integrity) | M2 | Unchanged |
+| M3 (TOCTOU in session leader) | M3 | Unchanged |
+| M4 (error messages leak metadata) | M4 | Unchanged |
+| M5 (SSH key zeroization) | C1 | Elevated to Critical — SSH keys are the most operationally sensitive credentials |
+| M7 (sync holds read lock) | M1 | Unchanged |
+| M8 (tokio full features) | M6 | Unchanged |
+| M9 (yanked digest) | M8 | Folded into broader CI audit recommendation |
 
 ---
 
 ## Methodology Notes
 
-This audit was performed through manual code review of the complete codebase. Every `.rs` file in all workspace crates, both native prompt binaries, all specs, and all documentation were read. The review focused on:
+This audit was performed through manual code review of the complete codebase. Every `.rs` file in all workspace crates was read in full. The review focused on:
 
-1. **Data flow tracing**: Following secrets (passwords, PINs, keys, tokens) from entry point through storage to destruction
+1. **Data flow tracing**: Following secrets (passwords, PINs, keys, tokens) from entry point through storage to destruction — with particular attention to `Zeroizing<String>` chain-of-custody breaks
 2. **Trust boundary analysis**: Identifying where untrusted input crosses a boundary and how it's validated
 3. **State machine correctness**: Verifying that all state transitions are properly guarded
 4. **Concurrency safety**: Checking lock ordering, TOCTOU patterns, and potential deadlocks
 5. **Error handling completeness**: Ensuring errors don't leak information or create inconsistent state
 6. **Dependency risk assessment**: Evaluating the supply chain surface area
+7. **Defense-in-depth evaluation**: For a password manager, every layer must assume every other layer has failed
 
 This audit does not include fuzzing, dynamic analysis, or penetration testing against a running instance. Those would complement this review.
