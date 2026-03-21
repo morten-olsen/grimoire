@@ -98,7 +98,10 @@ impl RpcError {
     }
 
     pub fn prompt_unavailable() -> Self {
-        Self::new(1008, "No interactive prompt available — provide password in params")
+        Self::new(
+            1008,
+            "No interactive prompt available — provide password in params",
+        )
     }
 
     pub fn access_approval_denied() -> Self {

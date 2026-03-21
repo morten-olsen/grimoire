@@ -47,12 +47,7 @@ impl SshClient {
     }
 
     /// Sign data with an SSH key from the vault.
-    pub async fn sign(
-        &self,
-        key_id: &str,
-        data: &[u8],
-        flags: u32,
-    ) -> Result<Vec<u8>, SdkError> {
+    pub async fn sign(&self, key_id: &str, data: &[u8], flags: u32) -> Result<Vec<u8>, SdkError> {
         let pm = self.client.lock().await;
 
         let view = pm
@@ -191,7 +186,12 @@ mod tests {
         assert_eq!(parsed_algo, "ssh-ed25519");
 
         let soff = 4 + alen;
-        let slen = u32::from_be_bytes([encoded[soff], encoded[soff + 1], encoded[soff + 2], encoded[soff + 3]]) as usize;
+        let slen = u32::from_be_bytes([
+            encoded[soff],
+            encoded[soff + 1],
+            encoded[soff + 2],
+            encoded[soff + 3],
+        ]) as usize;
         let parsed_sig = &encoded[soff + 4..soff + 4 + slen];
         assert_eq!(parsed_sig, &raw_sig);
     }

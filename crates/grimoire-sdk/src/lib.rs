@@ -64,12 +64,11 @@ impl GrimoireClient {
         };
         let migrations = bitwarden_pm::migrations::get_sdk_managed_migrations();
 
-        if let Err(e) = pm
-            .0
-            .platform()
-            .state()
-            .initialize_database(db_config, migrations)
-            .await
+        if let Err(e) =
+            pm.0.platform()
+                .state()
+                .initialize_database(db_config, migrations)
+                .await
         {
             tracing::warn!("Failed to initialize state database: {e}");
         }
@@ -80,12 +79,12 @@ impl GrimoireClient {
         state_client.register_client_managed::<InMemoryRepository<LocalUserDataKeyState>, LocalUserDataKeyState>(
             Arc::new(InMemoryRepository::new()),
         );
-        state_client.register_client_managed::<InMemoryRepository<Cipher>, Cipher>(
-            Arc::new(InMemoryRepository::new()),
-        );
-        state_client.register_client_managed::<InMemoryRepository<Folder>, Folder>(
-            Arc::new(InMemoryRepository::new()),
-        );
+        state_client.register_client_managed::<InMemoryRepository<Cipher>, Cipher>(Arc::new(
+            InMemoryRepository::new(),
+        ));
+        state_client.register_client_managed::<InMemoryRepository<Folder>, Folder>(Arc::new(
+            InMemoryRepository::new(),
+        ));
         state_client.register_client_managed::<InMemoryRepository<EphemeralPinEnvelopeState>, EphemeralPinEnvelopeState>(
             Arc::new(InMemoryRepository::new()),
         );

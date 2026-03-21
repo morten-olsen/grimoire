@@ -149,7 +149,8 @@ mod tests {
 
     #[test]
     fn parse_server_url() {
-        let config: Config = toml::from_str("[server]\nurl = \"https://vault.example.com\"").unwrap();
+        let config: Config =
+            toml::from_str("[server]\nurl = \"https://vault.example.com\"").unwrap();
         assert_eq!(config.server.url, "https://vault.example.com");
     }
 

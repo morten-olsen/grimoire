@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::{CommandFactory, Parser, Subcommand};
 use grimoire_common::socket;
 use grimoire_protocol::codec::{handshake_client, read_message, write_message};
 use grimoire_protocol::request::{
@@ -6,10 +7,9 @@ use grimoire_protocol::request::{
     VaultTotpParams,
 };
 use grimoire_protocol::response::{error_codes, Response};
-use clap::{CommandFactory, Parser, Subcommand};
 use tokio::net::UnixStream;
-use zeroize::Zeroizing;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroizing;
 
 mod commands;
 
@@ -111,16 +111,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     type ResponseHandler = Box<dyn Fn(Response, bool) -> Result<()>>;
-    let (request, handler): (Request, ResponseHandler) = match cli.command
-    {
+    let (request, handler): (Request, ResponseHandler) = match cli.command {
         Commands::Status => (
             Request::new(1, methods::AUTH_STATUS, None),
             Box::new(commands::handle_status),
         ),
         Commands::Login { email, server } => {
             // Login is a one-time setup — prompt in the terminal.
-            let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
-                .context("Failed to read password")?);
+            let password = Zeroizing::new(
+                rpassword::prompt_password("Master password: ")
+                    .context("Failed to read password")?,
+            );
             (
                 Request::new(
                     1,
@@ -158,10 +159,7 @@ async fn main() -> Result<()> {
             Request::new(
                 1,
                 methods::VAULT_LIST,
-                Some(RequestParams::VaultList(VaultListParams {
-                    r#type,
-                    search,
-                })),
+                Some(RequestParams::VaultList(VaultListParams { r#type, search })),
             ),
             Box::new(commands::handle_list),
         ),
@@ -197,8 +195,10 @@ async fn main() -> Result<()> {
             Box::new(commands::handle_totp),
         ),
         Commands::Authorize => {
-            let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
-                .context("Failed to read password")?);
+            let password = Zeroizing::new(
+                rpassword::prompt_password("Master password: ")
+                    .context("Failed to read password")?,
+            );
             (
                 Request::new(
                     1,
@@ -255,8 +255,10 @@ async fn main() -> Result<()> {
                 // already prompted for it) to avoid a redundant second prompt.
                 let password = match &request.params {
                     Some(RequestParams::Unlock(UnlockParams { password: Some(pw) })) => pw.clone(),
-                    _ => Zeroizing::new(rpassword::prompt_password("Master password: ")
-                        .context("Failed to read password")?),
+                    _ => Zeroizing::new(
+                        rpassword::prompt_password("Master password: ")
+                            .context("Failed to read password")?,
+                    ),
                 };
                 let unlock_resp = send_request(Request::new(
                     1,
@@ -283,8 +285,10 @@ async fn main() -> Result<()> {
             | error_codes::ACCESS_DENIED => {
                 // Session expired / prompt unavailable / access approval denied
                 eprintln!("Authorization required.");
-                let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
-                    .context("Failed to read password")?);
+                let password = Zeroizing::new(
+                    rpassword::prompt_password("Master password: ")
+                        .context("Failed to read password")?,
+                );
                 let auth_resp = send_request(Request::new(
                     1,
                     methods::AUTH_AUTHORIZE,
@@ -308,7 +312,10 @@ async fn main() -> Result<()> {
 fn handle_service_action(action: ServiceAction) -> Result<()> {
     match action {
         ServiceAction::SshSocket => {
-            println!("{}", grimoire_common::socket::ssh_agent_socket_path().display());
+            println!(
+                "{}",
+                grimoire_common::socket::ssh_agent_socket_path().display()
+            );
             Ok(())
         }
         ServiceAction::Install => install_service(),
@@ -483,14 +490,12 @@ fn uninstall_service() -> Result<()> {
 
 async fn send_request(request: Request) -> Result<Response> {
     let socket_path = socket::service_socket_path();
-    let stream = UnixStream::connect(&socket_path)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to connect to grimoire-service at {}.\nIs the service running?",
-                socket_path.display()
-            )
-        })?;
+    let stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "Failed to connect to grimoire-service at {}.\nIs the service running?",
+            socket_path.display()
+        )
+    })?;
 
     let (mut reader, mut writer) = stream.into_split();
 
@@ -542,8 +547,10 @@ async fn handle_run(command: Vec<String>) -> Result<()> {
             match err.code {
                 error_codes::VAULT_LOCKED => {
                     eprintln!("Vault is locked.");
-                    let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
-                        .context("Failed to read password")?);
+                    let password = Zeroizing::new(
+                        rpassword::prompt_password("Master password: ")
+                            .context("Failed to read password")?,
+                    );
                     let unlock_resp = send_request(Request::new(
                         1,
                         methods::AUTH_UNLOCK,
@@ -558,11 +565,13 @@ async fn handle_run(command: Vec<String>) -> Result<()> {
                     response = send_request(resolve_request).await?;
                 }
                 error_codes::SESSION_EXPIRED
-            | error_codes::PROMPT_UNAVAILABLE
-            | error_codes::ACCESS_DENIED => {
+                | error_codes::PROMPT_UNAVAILABLE
+                | error_codes::ACCESS_DENIED => {
                     eprintln!("Authorization required.");
-                    let password = Zeroizing::new(rpassword::prompt_password("Master password: ")
-                        .context("Failed to read password")?);
+                    let password = Zeroizing::new(
+                        rpassword::prompt_password("Master password: ")
+                            .context("Failed to read password")?,
+                    );
                     let auth_resp = send_request(Request::new(
                         1,
                         methods::AUTH_AUTHORIZE,
@@ -664,7 +673,8 @@ mod tests {
 
     #[test]
     fn parse_grimoire_ref_full_uuid() {
-        let r = parse_grimoire_ref("grimoire:64b18d6b-8161-4a0c-befb-c3484d36ec68/username").unwrap();
+        let r =
+            parse_grimoire_ref("grimoire:64b18d6b-8161-4a0c-befb-c3484d36ec68/username").unwrap();
         assert_eq!(r.id, "64b18d6b-8161-4a0c-befb-c3484d36ec68");
         assert_eq!(r.field, "username");
     }

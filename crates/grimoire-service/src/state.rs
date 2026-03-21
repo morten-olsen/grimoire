@@ -1,9 +1,9 @@
+use chrono::{DateTime, Utc};
 use grimoire_common::config::{PromptMethod, PIN_MAX_ATTEMPTS};
 use grimoire_sdk::auth::{LoginCredentials, LoginState};
-use std::collections::HashMap;
 use grimoire_sdk::vault::{CipherDetail, CipherSummary, VaultFilter};
 use grimoire_sdk::{GrimoireClient, SdkError};
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -137,7 +137,13 @@ impl ServiceState {
                     server_url = %server_url,
                     "Restored login state from disk — starting in Locked state"
                 );
-                base(VaultState::Locked, Some(email), Some(server_url), Some(sdk), Some(login_state))
+                base(
+                    VaultState::Locked,
+                    Some(email),
+                    Some(server_url),
+                    Some(sdk),
+                    Some(login_state),
+                )
             }
             Ok(None) => {
                 tracing::info!("No persisted login state — starting in LoggedOut state");
@@ -328,7 +334,9 @@ impl ServiceState {
         let sdk = self.sdk.as_ref().ok_or(SdkError::NotLoggedIn)?;
         let email = self.email.as_deref().ok_or(SdkError::NotLoggedIn)?;
         let server_url = self.server_url.as_deref().ok_or(SdkError::NotLoggedIn)?;
-        sdk.auth().verify_password(email, password, server_url).await
+        sdk.auth()
+            .verify_password(email, password, server_url)
+            .await
     }
 
     pub async fn vault_list(&self, filter: VaultFilter) -> Result<Vec<CipherSummary>, SdkError> {
@@ -421,7 +429,7 @@ mod tests {
         let mut state = ServiceState::new(PromptMethod::None).await;
         state.record_password_failure(); // attempt 1
         state.record_password_failure(); // attempt 2
-        // Should have some backoff remaining (1s - elapsed)
+                                         // Should have some backoff remaining (1s - elapsed)
         assert!(state.master_password_backoff_remaining() <= 1);
     }
 
@@ -535,7 +543,5 @@ mod tests {
 }
 
 pub async fn new_shared_state(prompt_method: PromptMethod) -> SharedState {
-    Arc::new(RwLock::new(
-        ServiceState::new(prompt_method).await,
-    ))
+    Arc::new(RwLock::new(ServiceState::new(prompt_method).await))
 }

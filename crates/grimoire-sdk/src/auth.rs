@@ -88,11 +88,7 @@ impl AuthClient {
     }
 
     /// Unlock: verify credentials and initialize crypto so vault operations work.
-    pub async fn unlock(
-        &self,
-        password: &str,
-        login_state: &LoginState,
-    ) -> Result<(), SdkError> {
+    pub async fn unlock(&self, password: &str, login_state: &LoginState) -> Result<(), SdkError> {
         self.auth_and_init_crypto(&login_state.email, password, &login_state.server_url)
             .await
     }
@@ -113,9 +109,7 @@ impl AuthClient {
         let master_auth = MasterPasswordAuthenticationData::derive(password, &kdf, email)
             .map_err(|e| SdkError::AuthFailed(format!("Key derivation failed: {e}")))?;
 
-        let password_hash = master_auth
-            .master_password_authentication_hash
-            .to_string();
+        let password_hash = master_auth.master_password_authentication_hash.to_string();
 
         let token_response = login_token_request(&http, url, email, &password_hash).await?;
 
@@ -145,9 +139,7 @@ impl AuthClient {
         let master_auth = MasterPasswordAuthenticationData::derive(password, &kdf, email)
             .map_err(|e| SdkError::AuthFailed(format!("Key derivation failed: {e}")))?;
 
-        let password_hash = master_auth
-            .master_password_authentication_hash
-            .to_string();
+        let password_hash = master_auth.master_password_authentication_hash.to_string();
 
         let token_response = login_token_request(&http, url, email, &password_hash).await?;
 
@@ -259,7 +251,10 @@ async fn prelogin(http: &reqwest::Client, server_url: &str, email: &str) -> Resu
         .await
         .map_err(|e| SdkError::AuthFailed(format!("Failed to parse prelogin: {e}")))?;
 
-    let kdf_type = data["kdf"].as_i64().or_else(|| data["Kdf"].as_i64()).unwrap_or(0);
+    let kdf_type = data["kdf"]
+        .as_i64()
+        .or_else(|| data["Kdf"].as_i64())
+        .unwrap_or(0);
     let iterations = data["kdfIterations"]
         .as_i64()
         .or_else(|| data["KdfIterations"].as_i64())

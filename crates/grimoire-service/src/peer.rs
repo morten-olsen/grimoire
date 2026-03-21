@@ -56,7 +56,10 @@ mod tests {
         let pid = std::process::id();
         let leader = get_session_leader(pid);
         // Should succeed for our own process
-        assert!(leader.is_some(), "Failed to get session leader for PID {pid}");
+        assert!(
+            leader.is_some(),
+            "Failed to get session leader for PID {pid}"
+        );
         let leader_pid = leader.unwrap();
         // Session leader PID should be a valid positive number
         assert!(leader_pid > 0);

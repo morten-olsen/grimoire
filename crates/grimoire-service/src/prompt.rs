@@ -42,7 +42,10 @@ fn prompt_binary() -> String {
 
     // Check PATH for native binary
     if !native_name.is_empty() {
-        if let Ok(output) = std::process::Command::new("which").arg(native_name).output() {
+        if let Ok(output) = std::process::Command::new("which")
+            .arg(native_name)
+            .output()
+        {
             if output.status.success() {
                 return native_name.into();
             }
@@ -68,7 +71,10 @@ pub async fn prompt_password(method: &PromptMethod) -> Result<Option<Zeroizing<S
     }
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    let output = cmd.output().await.context("Failed to spawn grimoire-prompt")?;
+    let output = cmd
+        .output()
+        .await
+        .context("Failed to spawn grimoire-prompt")?;
 
     if !output.status.success() && output.status.code() == Some(1) {
         return Ok(None); // User cancelled
@@ -96,7 +102,10 @@ pub async fn prompt_biometric(method: &PromptMethod, reason: &str) -> Result<boo
     let mut cmd = Command::new(prompt_binary());
     cmd.args(["biometric", "--reason", reason]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    let output = cmd.output().await.context("Failed to spawn grimoire-prompt")?;
+    let output = cmd
+        .output()
+        .await
+        .context("Failed to spawn grimoire-prompt")?;
 
     let response: PromptResponse =
         serde_json::from_slice(&output.stdout).context("Failed to parse prompt response")?;
@@ -140,7 +149,10 @@ pub async fn prompt_pin(
     }
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    let output = cmd.output().await.context("Failed to spawn grimoire-prompt")?;
+    let output = cmd
+        .output()
+        .await
+        .context("Failed to spawn grimoire-prompt")?;
 
     if !output.status.success() && output.status.code() == Some(1) {
         return Ok(None);

@@ -1,7 +1,7 @@
 use grimoire_common::config::{PromptMethod, APPROVAL_SECONDS};
 use grimoire_protocol::codec::{handshake_server, read_message, write_message};
 use grimoire_protocol::request::{
-    methods, LoginParams, ResolveRefsParams, Request, RequestParams, SetPinParams, SshSignParams,
+    methods, LoginParams, Request, RequestParams, ResolveRefsParams, SetPinParams, SshSignParams,
     UnlockParams, VaultGetParams, VaultListParams, VaultTotpParams,
 };
 use grimoire_protocol::response::{
@@ -187,7 +187,10 @@ async fn handle_login(
         if remaining > 0 {
             return Response::error(
                 id,
-                RpcError::new(1009, format!("Too many attempts. Try again in {remaining}s")),
+                RpcError::new(
+                    1009,
+                    format!("Too many attempts. Try again in {remaining}s"),
+                ),
             );
         }
     }
@@ -213,10 +216,7 @@ async fn handle_login(
     };
 
     let mut s = state.write().await;
-    match s
-        .login(email.clone(), password, server_url.clone())
-        .await
-    {
+    match s.login(email.clone(), password, server_url.clone()).await {
         Ok(_) => {
             s.reset_password_attempts();
             success_result(id, OkResult { ok: true })
@@ -242,7 +242,10 @@ async fn handle_unlock(
         if remaining > 0 {
             return Response::error(
                 id,
-                RpcError::new(1009, format!("Too many attempts. Try again in {remaining}s")),
+                RpcError::new(
+                    1009,
+                    format!("Too many attempts. Try again in {remaining}s"),
+                ),
             );
         }
     }
@@ -256,9 +259,7 @@ async fn handle_unlock(
 
     // Get password — either from params or by spawning the prompt agent
     let password = match params {
-        Some(RequestParams::Unlock(UnlockParams {
-            password: Some(pw),
-        })) => pw.clone(),
+        Some(RequestParams::Unlock(UnlockParams { password: Some(pw) })) => pw.clone(),
         _ => {
             // No password provided — try interactive prompt
             let prompt_method = state.read().await.prompt_method.clone();
@@ -352,9 +353,7 @@ async fn handle_authorize(
 ) -> Response {
     // Extract password from UnlockParams (reused — same shape)
     let password = match params {
-        Some(RequestParams::Unlock(UnlockParams {
-            password: Some(pw),
-        })) => pw.clone(),
+        Some(RequestParams::Unlock(UnlockParams { password: Some(pw) })) => pw.clone(),
         _ => {
             return Response::error(id, RpcError::invalid_params("Expected {password}"));
         }
@@ -372,7 +371,10 @@ async fn handle_authorize(
         if remaining > 0 {
             return Response::error(
                 id,
-                RpcError::new(1009, format!("Too many attempts. Try again in {remaining}s")),
+                RpcError::new(
+                    1009,
+                    format!("Too many attempts. Try again in {remaining}s"),
+                ),
             );
         }
     }
@@ -501,10 +503,14 @@ async fn handle_resolve_refs(
     };
 
     // Get all ciphers once for resolving
-    let all_items = match sdk.vault().list(grimoire_sdk::vault::VaultFilter {
-        cipher_type: None,
-        search: None,
-    }).await {
+    let all_items = match sdk
+        .vault()
+        .list(grimoire_sdk::vault::VaultFilter {
+            cipher_type: None,
+            search: None,
+        })
+        .await
+    {
         Ok(items) => items,
         Err(e) => return Response::error(id, sdk_err_to_rpc(e)),
     };
@@ -543,7 +549,11 @@ async fn resolve_single_ref(
         match matches.len() {
             0 => return Err(format!("No item named '{name}'")),
             1 => matches[0].id.clone(),
-            n => return Err(format!("Ambiguous name '{name}' matches {n} items — use ID instead")),
+            n => {
+                return Err(format!(
+                    "Ambiguous name '{name}' matches {n} items — use ID instead"
+                ))
+            }
         }
     } else {
         // ID prefix match
@@ -612,7 +622,10 @@ async fn handle_ssh_sign(
         flags,
     })) = params
     else {
-        return Response::error(id, RpcError::invalid_params("Expected {key_id, data, flags}"));
+        return Response::error(
+            id,
+            RpcError::invalid_params("Expected {key_id, data, flags}"),
+        );
     };
 
     let s = state.read().await;
@@ -621,9 +634,7 @@ async fn handle_ssh_sign(
     };
 
     match sdk.ssh().sign(key_id, data, *flags).await {
-        Ok(signature) => {
-            success_result(id, serde_json::json!({ "signature": signature }))
-        }
+        Ok(signature) => success_result(id, serde_json::json!({ "signature": signature })),
         Err(e) => Response::error(id, sdk_err_to_rpc(e)),
     }
 }

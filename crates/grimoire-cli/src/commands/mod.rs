@@ -65,7 +65,10 @@ pub fn handle_list(response: Response, json: bool) -> Result<()> {
 
     for item in &items {
         let username = item.username.as_deref().unwrap_or("");
-        println!("{:<36}  {:<8}  {}  {}", item.id, item.r#type, item.name, username);
+        println!(
+            "{:<36}  {:<8}  {}  {}",
+            item.id, item.r#type, item.name, username
+        );
     }
     Ok(())
 }

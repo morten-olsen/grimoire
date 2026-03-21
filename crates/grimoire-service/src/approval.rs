@@ -103,6 +103,10 @@ pub async fn attempt_approval(
 async fn grant_approval(state: &SharedState, peer_pid: Option<u32>) {
     let scope_key = resolve_scope_key(peer_pid);
     let duration = std::time::Duration::from_secs(APPROVAL_SECONDS);
-    state.write().await.approval_cache.grant(scope_key, duration);
+    state
+        .write()
+        .await
+        .approval_cache
+        .grant(scope_key, duration);
     tracing::info!(scope_key, "Access approved");
 }

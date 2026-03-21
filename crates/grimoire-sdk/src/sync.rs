@@ -53,12 +53,11 @@ impl SyncClient {
             .map_err(|e| SdkError::SyncFailed(format!("Failed to parse sync response: {e}")))?;
 
         let pm = self.client.lock().await;
-        let repo: Arc<dyn Repository<Cipher>> = pm
-            .0
-            .platform()
-            .state()
-            .get::<Cipher>()
-            .map_err(|e| SdkError::SyncFailed(format!("No cipher repository: {e}")))?;
+        let repo: Arc<dyn Repository<Cipher>> =
+            pm.0.platform()
+                .state()
+                .get::<Cipher>()
+                .map_err(|e| SdkError::SyncFailed(format!("No cipher repository: {e}")))?;
 
         // Log top-level keys to diagnose field naming
         if let Some(obj) = body.as_object() {

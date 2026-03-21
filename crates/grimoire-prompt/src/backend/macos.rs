@@ -40,9 +40,7 @@ set theAnswer to text returned of result
 return theAnswer"#
         );
 
-        let output = Command::new("osascript")
-            .args(["-e", &script])
-            .output()?;
+        let output = Command::new("osascript").args(["-e", &script]).output()?;
 
         if !output.status.success() {
             return Ok(None);

@@ -54,8 +54,12 @@ pub async fn run(config: Config) -> Result<()> {
         if ssh_socket_path.exists() {
             let _ = fs::remove_file(&ssh_socket_path);
         }
-        let ssh_listener = UnixListener::bind(&ssh_socket_path)
-            .with_context(|| format!("Failed to bind SSH agent socket: {}", ssh_socket_path.display()))?;
+        let ssh_listener = UnixListener::bind(&ssh_socket_path).with_context(|| {
+            format!(
+                "Failed to bind SSH agent socket: {}",
+                ssh_socket_path.display()
+            )
+        })?;
         fs::set_permissions(&ssh_socket_path, fs::Permissions::from_mode(0o600))?;
 
         tracing::info!("SSH agent listening on {}", ssh_socket_path.display());

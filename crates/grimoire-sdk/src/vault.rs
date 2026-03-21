@@ -130,7 +130,9 @@ impl VaultClient {
             let q = search.to_lowercase();
             items.retain(|c| {
                 c.name.to_lowercase().contains(&q)
-                    || c.username.as_deref().is_some_and(|u| u.to_lowercase().contains(&q))
+                    || c.username
+                        .as_deref()
+                        .is_some_and(|u| u.to_lowercase().contains(&q))
             });
         }
 

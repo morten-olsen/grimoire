@@ -26,7 +26,10 @@ impl SshAgentHandler {
 }
 
 impl ssh_agent_lib::agent::Agent<tokio::net::UnixListener> for SshAgentHandler {
-    fn new_session(&mut self, socket: &tokio::net::UnixStream) -> impl ssh_agent_lib::agent::Session {
+    fn new_session(
+        &mut self,
+        socket: &tokio::net::UnixStream,
+    ) -> impl ssh_agent_lib::agent::Session {
         let peer_pid = socket
             .peer_cred()
             .ok()

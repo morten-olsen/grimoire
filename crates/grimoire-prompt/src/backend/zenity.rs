@@ -27,8 +27,7 @@ impl ZenityBackend {
 /// Check if any GUI dialog tool is available.
 pub fn is_available() -> bool {
     // Also require a display server
-    let has_display =
-        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
     has_display && (has_command("zenity") || has_command("kdialog"))
 }
 

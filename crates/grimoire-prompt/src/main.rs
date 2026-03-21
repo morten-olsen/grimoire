@@ -6,7 +6,10 @@ use zeroize::Zeroizing;
 mod backend;
 
 #[derive(Parser)]
-#[command(name = "grimoire-prompt", about = "Grimoire interactive authentication agent")]
+#[command(
+    name = "grimoire-prompt",
+    about = "Grimoire interactive authentication agent"
+)]
 struct Cli {
     #[command(subcommand)]
     mode: Mode,
@@ -101,7 +104,8 @@ fn main() {
 
     let cli = Cli::parse();
     let Some(backend) = backend::detect() else {
-        PromptResult::error("No GUI prompt backend available (need zenity, kdialog, or osascript)").emit();
+        PromptResult::error("No GUI prompt backend available (need zenity, kdialog, or osascript)")
+            .emit();
     };
 
     match cli.mode {

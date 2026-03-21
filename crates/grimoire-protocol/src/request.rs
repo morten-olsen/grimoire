@@ -168,7 +168,9 @@ mod tests {
     fn deserialize_login_params() {
         let json = r#"{"email":"user@test.com","password":"secret","server_url":"https://vault.example.com"}"#;
         let params: RequestParams = serde_json::from_str(json).unwrap();
-        assert!(matches!(params, RequestParams::Login(LoginParams { ref email, .. }) if email == "user@test.com"));
+        assert!(
+            matches!(params, RequestParams::Login(LoginParams { ref email, .. }) if email == "user@test.com")
+        );
     }
 
     #[test]
@@ -189,7 +191,9 @@ mod tests {
         let json = r#"{"password":"secret"}"#;
         let params: RequestParams = serde_json::from_str(json).unwrap();
         match params {
-            RequestParams::Unlock(up) => assert_eq!(up.password, Some(Zeroizing::new("secret".into()))),
+            RequestParams::Unlock(up) => {
+                assert_eq!(up.password, Some(Zeroizing::new("secret".into())))
+            }
             _ => panic!("Expected Unlock"),
         }
     }
@@ -238,7 +242,10 @@ mod tests {
         // because VaultGet also has a required `id` field.
         // VaultTotp is only reached through method dispatch, not param parsing.
         let params: RequestParams = serde_json::from_str(json).unwrap();
-        assert!(matches!(params, RequestParams::VaultGet(_) | RequestParams::VaultTotp(_)));
+        assert!(matches!(
+            params,
+            RequestParams::VaultGet(_) | RequestParams::VaultTotp(_)
+        ));
     }
 
     #[test]
@@ -253,10 +260,14 @@ mod tests {
 
     #[test]
     fn request_roundtrip() {
-        let req = Request::new(42, "vault.list", Some(RequestParams::VaultList(VaultListParams {
-            r#type: Some("login".into()),
-            search: None,
-        })));
+        let req = Request::new(
+            42,
+            "vault.list",
+            Some(RequestParams::VaultList(VaultListParams {
+                r#type: Some("login".into()),
+                search: None,
+            })),
+        );
         let json = serde_json::to_string(&req).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, Some(42));

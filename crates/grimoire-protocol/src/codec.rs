@@ -159,7 +159,9 @@ impl Codec for EncryptedCodec {
         use chacha20poly1305::aead::Aead;
 
         if bytes.len() < 8 + 16 {
-            return Err(CodecError::Crypto("Message too short for decryption".into()));
+            return Err(CodecError::Crypto(
+                "Message too short for decryption".into(),
+            ));
         }
 
         // Parse counter from first 8 bytes (length guaranteed by check above)
@@ -275,7 +277,11 @@ where
 }
 
 /// Write a length-prefixed message to an async writer.
-pub async fn write_message<W, T>(writer: &mut W, codec: &impl Codec, msg: &T) -> Result<(), CodecError>
+pub async fn write_message<W, T>(
+    writer: &mut W,
+    codec: &impl Codec,
+    msg: &T,
+) -> Result<(), CodecError>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
@@ -522,9 +528,7 @@ mod tests {
         write_message(&mut client_write, &client_codec, &msg)
             .await
             .unwrap();
-        let received: TestMsg = read_message(&mut server_read, &server_codec)
-            .await
-            .unwrap();
+        let received: TestMsg = read_message(&mut server_read, &server_codec).await.unwrap();
         assert_eq!(received, msg);
 
         // Server sends, client receives
@@ -535,9 +539,7 @@ mod tests {
         write_message(&mut server_write, &server_codec, &reply)
             .await
             .unwrap();
-        let received: TestMsg = read_message(&mut client_read, &client_codec)
-            .await
-            .unwrap();
+        let received: TestMsg = read_message(&mut client_read, &client_codec).await.unwrap();
         assert_eq!(received, reply);
     }
 }
