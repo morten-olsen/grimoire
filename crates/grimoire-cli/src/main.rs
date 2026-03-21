@@ -364,6 +364,21 @@ fn install_service() -> Result<()> {
         std::fs::create_dir_all(&log_dir)?;
         let log_dir = log_dir.display();
         let ssh_sock = grimoire_common::socket::ssh_agent_socket_path();
+        // Capture XDG_RUNTIME_DIR so the service uses the same socket path
+        // as the CLI. launchd doesn't inherit shell environment variables.
+        let env_section = if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+            format!(
+                r#"
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>XDG_RUNTIME_DIR</key>
+        <string>{xdg}</string>
+    </dict>"#
+            )
+        } else {
+            String::new()
+        };
+
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -376,7 +391,7 @@ fn install_service() -> Result<()> {
         <string>{}</string>
     </array>
     <key>RunAtLoad</key>
-    <true/>
+    <true/>{env_section}
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
