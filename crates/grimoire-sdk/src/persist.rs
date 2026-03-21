@@ -73,6 +73,66 @@ pub fn load_login_state() -> Result<Option<LoginState>, SdkError> {
     }))
 }
 
+// --- Backoff persistence ---
+// Prevents attackers from bypassing rate limiting by restarting the service.
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedBackoff {
+    attempts: u32,
+    /// Unix timestamp (seconds) of the last failed attempt.
+    last_attempt_epoch: Option<u64>,
+}
+
+fn backoff_file_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("grimoire").join("backoff.json"))
+}
+
+/// Load persisted backoff state. Returns (attempts, last_attempt_epoch).
+/// Returns defaults if the file doesn't exist or can't be parsed.
+pub fn load_backoff() -> (u32, Option<u64>) {
+    let Some(path) = backoff_file_path() else {
+        return (0, None);
+    };
+    let Ok(json) = fs::read_to_string(&path) else {
+        return (0, None);
+    };
+    let Ok(state) = serde_json::from_str::<PersistedBackoff>(&json) else {
+        return (0, None);
+    };
+    (state.attempts, state.last_attempt_epoch)
+}
+
+/// Save backoff state to disk after a failed password attempt.
+pub fn save_backoff(attempts: u32, last_attempt_epoch: Option<u64>) {
+    let Some(path) = backoff_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let state = PersistedBackoff {
+        attempts,
+        last_attempt_epoch,
+    };
+    let Ok(json) = serde_json::to_string(&state) else {
+        return;
+    };
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut f| f.write_all(json.as_bytes()));
+}
+
+/// Clear backoff state (on successful authentication).
+pub fn clear_backoff() {
+    if let Some(path) = backoff_file_path() {
+        let _ = fs::remove_file(&path);
+    }
+}
+
 /// Delete persisted login state (on logout).
 pub fn clear_login_state() {
     if let Some(path) = state_file_path() {

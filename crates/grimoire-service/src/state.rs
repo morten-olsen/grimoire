@@ -5,7 +5,7 @@ use grimoire_sdk::vault::{CipherDetail, CipherSummary, VaultFilter};
 use grimoire_sdk::{GrimoireClient, SdkError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -110,6 +110,19 @@ pub struct ServiceState {
 
 impl ServiceState {
     pub async fn new(prompt_method: PromptMethod) -> Self {
+        // Restore persisted backoff state to prevent restart-based bypass.
+        let (persisted_attempts, persisted_epoch) = grimoire_sdk::persist::load_backoff();
+        let last_password_attempt = persisted_epoch.and_then(|epoch| {
+            let now_epoch = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Convert absolute epoch to a relative Instant by computing elapsed time.
+            // If the persisted time is in the future (clock skew), treat as "just now".
+            let elapsed_secs = now_epoch.saturating_sub(epoch);
+            Instant::now().checked_sub(Duration::from_secs(elapsed_secs))
+        });
+
         // Try to restore persisted login state from a previous session.
         // If found, start in Locked state (need unlock, not full login).
         let base = |vault_state, email, server_url, sdk, login_state| Self {
@@ -121,8 +134,8 @@ impl ServiceState {
             session: None,
             prompt_method: prompt_method.clone(),
             approval_cache: ApprovalCache::new(),
-            master_password_attempts: 0,
-            last_password_attempt: None,
+            master_password_attempts: persisted_attempts,
+            last_password_attempt,
             sdk,
             login_state,
         };
@@ -178,11 +191,18 @@ impl ServiceState {
             attempt = self.master_password_attempts,
             "Master password attempt failed"
         );
+        // Persist to disk so restarting the service doesn't reset the backoff.
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        grimoire_sdk::persist::save_backoff(self.master_password_attempts, Some(epoch));
     }
 
     pub fn reset_password_attempts(&mut self) {
         self.master_password_attempts = 0;
         self.last_password_attempt = None;
+        grimoire_sdk::persist::clear_backoff();
     }
 
     pub fn touch(&mut self) {
@@ -230,7 +250,7 @@ impl ServiceState {
         Ok(())
     }
 
-    pub async fn unlock(&mut self, password: &str) -> Result<(), SdkError> {
+    pub async fn unlock(&mut self, password: &Zeroizing<String>) -> Result<(), SdkError> {
         if self.vault_state != VaultState::Locked {
             return Err(match self.vault_state {
                 VaultState::LoggedOut => SdkError::NotLoggedIn,
@@ -327,7 +347,7 @@ impl ServiceState {
     }
 
     /// Verify the master password against the server without reinitializing crypto.
-    pub async fn verify_password(&self, password: &str) -> Result<(), SdkError> {
+    pub async fn verify_password(&self, password: &Zeroizing<String>) -> Result<(), SdkError> {
         if self.vault_state != VaultState::Unlocked {
             return Err(SdkError::VaultLocked);
         }
