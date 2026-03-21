@@ -22,22 +22,6 @@ A lightweight TCP proxy (e.g., for Postgres) that intercepts the auth handshake 
 
 ## Developer Tooling
 
-### Git Credential Helper (`git-credential-grimoire`)
-
-Git supports pluggable credential helpers. Grimoire could serve HTTPS credentials for GitHub/GitLab/Gitea with biometric approval on each `git push`. Combined with the existing SSH agent for SSH-based auth, this covers both Git transport protocols.
-
-### `.env.grimoire` Manifest Files
-
-Extend `grimoire run` to support a declarative manifest file:
-
-```
-# .env.grimoire
-DATABASE_URL=grimoire://Production DB/password
-API_KEY=grimoire://Stripe/notes
-```
-
-Teams check in the manifest (no actual secrets) and `grimoire run` resolves them all. Already 90% there with `grimoire run`'s existing env var scanning — this just adds file-based input.
-
 ### HTTP Credential Provider
 
 Automatically supply HTTP credentials from the vault for tools like `curl`, `wget`, and `httpie` — eliminating plaintext `.netrc` files and manual token copy-paste during API testing.
@@ -116,37 +100,6 @@ GITHUB_TOKEN="grimoire-token://GitHub App" grimoire run -- ./deploy.sh
 - Scopes may vary per invocation for the same client — cache key must include requested scopes
 
 This pairs well with the HTTP credential provider (which could delegate to the token broker for OAuth2 items) and with `grimoire run` (via a `grimoire-token://` reference scheme).
-
-### Password/Passphrase Generation (`grimoire generate`)
-
-Integrated password and passphrase generator:
-
-```bash
-# Random password
-grimoire generate --length 32 --charset alphanumeric+symbols
-
-# Diceware-style passphrase
-grimoire generate --type passphrase --words 6
-
-# Generate and store directly (requires vault write ops)
-grimoire generate --length 24 --save "New API Key"
-```
-
-Basic utility, but important for a security tool — users should be able to generate and store credentials in one flow without reaching for another tool.
-
-### Clipboard with Auto-Clear (`grimoire clip`)
-
-Copy a secret to the system clipboard and automatically clear it after a timeout:
-
-```bash
-# Copy password to clipboard, clear after 15 seconds
-grimoire clip <id>
-
-# Copy a specific field
-grimoire clip <id> -f totp
-```
-
-Table-stakes for password managers. Requires platform-specific clipboard access (`pbcopy`/`pbpaste` on macOS, `xclip`/`wl-copy` on Linux). The auto-clear timer should survive even if Grimoire exits (spawn a background clearer or use platform clipboard expiry where available).
 
 ### IDE/Editor Plugin (VS Code, JetBrains)
 
@@ -425,9 +378,9 @@ Each feature falls into one of three categories based on where it should live ar
 
 | Feature | Why core | Service changes | CLI changes |
 |---------|----------|-----------------|-------------|
-| **`.env.grimoire` manifest** | Extension of existing `grimoire run` — adding file input to an existing command | None — `vault.resolve_refs` already exists | Parse manifest file, merge into env before exec |
-| **Password generation** | Fundamental utility; no external dependency; expected in a security tool | None (pure generation) or new RPC if `--save` needs vault write | `grimoire generate` subcommand |
-| **Clipboard with auto-clear** | Core UX convenience; tightly coupled to `vault.get` flow | None — uses existing `vault.get` | `grimoire clip` subcommand + platform clipboard code |
+| **~~`.env.grimoire` manifest~~** | ~~Implemented — ADR 015~~ | | |
+| **~~Password generation~~** | ~~Implemented — ADR 013~~ | | |
+| **~~Clipboard with auto-clear~~** | ~~Implemented — ADR 012~~ | | |
 | **Application key derivation** | Needs access to decrypted vault secrets + HKDF inside the service process; key material must never cross the socket as a raw secret | New RPC: `vault.derive_key` — performs HKDF inside the service | `grimoire derive-key` subcommand (optional) |
 | **Crypto operations (sign/decrypt)** | Private keys must stay in the service process; signing/decryption happens inside the trust boundary | New RPCs: `crypto.sign`, `crypto.decrypt` — raw data in, signature/plaintext out | `grimoire sign`, `grimoire decrypt` subcommands |
 | **OAuth2 token broker** | Token cache should live in the service (survives CLI exits, shared across invocations); client secrets are vault items that should never leave the service | New RPC: `oauth.token` — handles exchange, caching, refresh internally | `grimoire token` subcommand |
@@ -444,7 +397,7 @@ Each feature falls into one of three categories based on where it should live ar
 | **PAM module** | Must be a `.so` loaded by the PAM stack into `sudo`/`sshd`/`login`. Cannot be part of grimoire's Rust binary — PAM has its own C ABI and module loading conventions | C or Rust (with `cdylib`) | Connects to Grimoire's socket, calls `auth.attest` or a new `auth.verify` RPC |
 | **PKCS#11 module** | Must be a `.so` loaded by applications (Firefox, OpenVPN, OpenSSL). PKCS#11 has a C ABI that the consuming application `dlopen()`s | C or Rust (`cdylib`) | Proxies `C_Sign`/`C_Decrypt`/`C_GetAttributeValue` calls to Grimoire's socket via `crypto.sign`/`crypto.decrypt` RPCs |
 | **Docker credential helper** | Docker requires a binary named `docker-credential-<name>` that speaks a specific JSON stdin/stdout protocol | Rust (small, standalone) | Calls `vault.get` over socket |
-| **Git credential helper** | Git requires a binary (or `grimoire credential-helper` subcommand) that speaks the `git-credential` protocol on stdin/stdout. See "Either" | Rust | Calls `vault.get` over socket with URI matching |
+| **~~Git credential helper~~** | ~~Implemented — see ADR 014~~ | | |
 | **SOPS/age plugin** | `age` has a defined plugin interface (`age-plugin-<name>` binary). SOPS delegates to `age`. Must be a separate binary | Rust | Calls `crypto.decrypt` (or `vault.get` for the age identity) over socket |
 | **IDE plugins** | VS Code (TypeScript), JetBrains (Kotlin/Java). Completely different ecosystems | TypeScript / Kotlin | Calls Grimoire socket or CLI as subprocess |
 | **IaC providers** | Terraform providers must be Go binaries (gRPC plugin protocol). Ansible lookup plugins must be Python | Go / Python | Calls Grimoire socket or CLI as subprocess |
@@ -457,7 +410,7 @@ Each feature falls into one of three categories based on where it should live ar
 
 | Feature | Built-in case | External case | Recommendation |
 |---------|--------------|---------------|----------------|
-| **Git credential helper** | `grimoire credential-helper` subcommand — git calls `grimoire credential-helper get`. Zero additional install, ships with the CLI. Simple enough (~100 LOC) to not bloat the codebase | Separate `git-credential-grimoire` binary — cleaner separation, independently versioned | **Built-in** — too small to justify a separate project; users shouldn't need to install a second binary for basic git HTTPS auth |
+| **~~Git credential helper~~** | ~~Implemented as built-in subcommand — see ADR 014~~ | | |
 | **SSH certificate authority** | CA signing + cert caching in the service; SSH agent auto-mints certs. Tightest integration, best UX (transparent to user) | Separate `grimoire-ssh-ca` that requests signing via `crypto.sign` RPC, manages cert generation externally, and injects certs into the user's SSH agent | **Built-in** — the killer feature is transparent cert minting inside the SSH agent. An external tool can't intercept agent auth challenges |
 | **FIDO2/WebAuthn authenticator** | Add CTAP2 handler to `grimoire-service` (new socket or virtual USB HID). Keeps credential keys inside the trust boundary | Separate `grimoire-webauthn` binary or browser extension that calls `crypto.sign` for assertions. Credential management via new vault RPCs | **External** — CTAP2/WebAuthn is a large spec surface; browser integration requires a platform-specific extension regardless. The service just needs `crypto.sign` which is already planned |
 | **WireGuard/VPN key injection** | Not really a feature — it's documentation/examples for using existing `grimoire run` and `grimoire get` with WireGuard/OpenVPN configs | A helper script (`grimoire-wg`) that wraps `wg-quick` with automatic secret injection | **Neither** — just document the pattern. Existing `grimoire run` already handles this |
@@ -468,10 +421,10 @@ Each feature falls into one of three categories based on where it should live ar
 
 | Feature | Delivery | Effort | Impact | Rationale |
 |---------|----------|--------|--------|-----------|
-| Clipboard with auto-clear | Core | Low | High | Table-stakes for password managers; small platform-specific code |
-| Git credential helper | Core | Low | High | ~100 LOC subcommand, covers HTTPS Git auth alongside existing SSH agent |
-| `.env.grimoire` manifest | Core | Low | High | Small extension to `grimoire run`, large DX improvement for teams |
-| Password generation | Core | Low | Medium | Basic utility; expected of any security tool |
+| ~~Clipboard with auto-clear~~ | ~~Core~~ | ~~Low~~ | ~~High~~ | ~~Implemented — ADR 012~~ |
+| ~~Git credential helper~~ | ~~Core~~ | ~~Low~~ | ~~High~~ | ~~Implemented — ADR 014~~ |
+| ~~`.env.grimoire` manifest~~ | ~~Core~~ | ~~Low~~ | ~~High~~ | ~~Implemented — ADR 015~~ |
+| ~~Password generation~~ | ~~Core~~ | ~~Low~~ | ~~Medium~~ | ~~Implemented — ADR 013~~ |
 | WireGuard/VPN key injection | Docs | Low | Medium | Already works with `grimoire run`; just needs documentation |
 | Docker credential helper | External | Low | Medium | Drop-in, well-defined protocol, narrow scope |
 | SOPS/age integration | External | Low | Medium | Plugin interface already defined by age, small adapter |
