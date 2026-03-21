@@ -7,12 +7,12 @@ tasks:
       - cargo build --workspace --release
       - cmd: |
           echo "Building macOS native prompt..."
-          cd native/macos && swift build -c release
+          cd native/macos && swift build -c release && cp .build/release/grimoire-prompt-macos ../../target/release/
         platforms: [darwin]
       - cmd: |
           if pkg-config --exists gtk4 libadwaita-1 2>/dev/null; then
             echo "Building Linux native prompt..."
-            cd native/linux && cargo build --release
+            cd native/linux && cargo build --release && cp target/release/grimoire-prompt-linux ../../target/release/
           fi
         platforms: [linux]
 
