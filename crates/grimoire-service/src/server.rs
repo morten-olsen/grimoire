@@ -3,12 +3,17 @@ use grimoire_common::config::Config;
 use grimoire_common::socket;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::signal;
+use tokio::sync::Semaphore;
 
 use crate::session;
 use crate::state;
 use crate::sync_worker;
+
+/// Maximum number of concurrent client connections.
+const MAX_CONNECTIONS: usize = 64;
 
 pub async fn run(config: Config) -> Result<()> {
     let socket_path = socket::service_socket_path();
@@ -35,6 +40,7 @@ pub async fn run(config: Config) -> Result<()> {
     tracing::info!("Listening on {}", socket_path.display());
 
     let shared_state = state::new_shared_state(config.prompt.method).await;
+    let conn_semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     // Spawn the auto-lock worker (hardcoded 900s)
     let auto_lock_state = shared_state.clone();
@@ -113,8 +119,16 @@ pub async fn run(config: Config) -> Result<()> {
                         }
 
                         let client_state = shared_state.clone();
+                        let permit = match conn_semaphore.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                tracing::warn!("Connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                                continue;
+                            }
+                        };
                         tokio::spawn(async move {
                             session::handle_client(stream, client_state, peer_pid).await;
+                            drop(permit); // Release connection slot
                         });
                     }
                     Err(e) => {

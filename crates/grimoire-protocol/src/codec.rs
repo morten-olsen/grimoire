@@ -16,8 +16,9 @@ pub enum CodecError {
     Crypto(String),
 }
 
-/// Maximum message size: 16 MiB (generous for vault payloads).
-const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
+/// Maximum message size: 1 MiB. Vault payloads are JSON summaries — even a
+/// vault with thousands of entries fits well under this limit.
+const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Codec trait for message framing. Allows swapping in encrypted codecs later.
 pub trait Codec: Send + Sync {

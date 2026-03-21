@@ -15,35 +15,54 @@ use tokio::net::UnixStream;
 use crate::prompt;
 use crate::state::{SharedState, VaultState};
 
+/// Timeout for the initial key exchange handshake.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Timeout for reading a single message from a client.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Handle a single client connection.
 pub async fn handle_client(stream: UnixStream, state: SharedState, peer_pid: Option<u32>) {
     let (mut reader, mut writer) = stream.into_split();
 
-    // X25519 key exchange — establish encrypted channel
-    let codec = match handshake_server(&mut reader, &mut writer).await {
-        Ok(c) => c,
-        Err(grimoire_protocol::codec::CodecError::ConnectionClosed) => {
+    // X25519 key exchange — establish encrypted channel (with timeout)
+    let codec = match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        handshake_server(&mut reader, &mut writer),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(grimoire_protocol::codec::CodecError::ConnectionClosed)) => {
             tracing::debug!("Client disconnected during handshake");
             return;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!("Handshake failed: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("Handshake timed out");
             return;
         }
     };
 
     loop {
-        let request: Request = match read_message(&mut reader, &codec).await {
-            Ok(req) => req,
-            Err(grimoire_protocol::codec::CodecError::ConnectionClosed) => {
-                tracing::debug!("Client disconnected");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read request: {e}");
-                return;
-            }
-        };
+        let request: Request =
+            match tokio::time::timeout(READ_TIMEOUT, read_message(&mut reader, &codec)).await {
+                Ok(Ok(req)) => req,
+                Ok(Err(grimoire_protocol::codec::CodecError::ConnectionClosed)) => {
+                    tracing::debug!("Client disconnected");
+                    return;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to read request: {e}");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!("Client idle timeout, disconnecting");
+                    return;
+                }
+            };
 
         let response = dispatch(&request, &state, peer_pid).await;
 
