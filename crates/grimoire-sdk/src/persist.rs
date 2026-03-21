@@ -41,13 +41,17 @@ pub fn save_login_state(state: &LoginState) -> Result<(), SdkError> {
         .map_err(|e| SdkError::Internal(format!("Failed to serialize: {e}")))?;
 
     // Create file with 0600 permissions atomically — no TOCTOU window.
+    // fsync to ensure data reaches disk before we report success.
     fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(&path)
-        .and_then(|mut f| f.write_all(json.as_bytes()))
+        .and_then(|mut f| {
+            f.write_all(json.as_bytes())?;
+            f.sync_all()
+        })
         .map_err(|e| SdkError::Internal(format!("Failed to write {}: {e}", path.display())))?;
 
     tracing::info!("Login state saved to {}", path.display());
