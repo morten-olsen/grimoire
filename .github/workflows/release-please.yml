@@ -12,8 +12,42 @@ jobs:
   release-please:
     name: Release Please
     runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.rp.outputs.pr }}
+      pr-branch: ${{ steps.rp.outputs.prs_created && fromJSON(steps.rp.outputs.pr).headBranchName || '' }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: rp
+        uses: googleapis/release-please-action@v4
         with:
           manifest-file: .release-please-manifest.json
           config-file: release-please-config.json
+
+  # When release-please creates/updates a PR, sync Cargo.lock with the
+  # bumped workspace version so the Nix build (which uses --locked) works.
+  sync-lockfile:
+    name: Sync Cargo.lock
+    needs: [release-please]
+    if: needs.release-please.outputs.pr-branch != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.pr-branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Update Cargo.lock
+        run: cargo update --workspace
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet Cargo.lock; then
+            echo "Cargo.lock already in sync"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: sync Cargo.lock with version bump"
+            git push
+          fi

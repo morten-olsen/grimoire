@@ -21,23 +21,6 @@
           inherit src;
           strictDeps = true;
 
-          # Workspace version may be bumped by release-please without
-          # regenerating Cargo.lock. Patch lockfile versions to match.
-          postPatch = let
-            crates = builtins.concatStringsSep "|" [
-              "grimoire-sdk" "grimoire-protocol" "grimoire-service"
-              "grimoire-cli" "grimoire-common" "grimoire-prompt"
-            ];
-          in ''
-            version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-            awk -v ver="$version" -v crates="${crates}" '
-              BEGIN { split(crates, c, "|"); for (i in c) names[c[i]]=1 }
-              /^name = / { name = ''$3; gsub(/"/, "", name); found = (name in names) }
-              found && /^version = / { ''$0 = "version = \"" ver "\""; found = 0 }
-              { print }
-            ' Cargo.lock > Cargo.lock.tmp && mv Cargo.lock.tmp Cargo.lock
-          '';
-
           buildInputs = [
             pkgs.openssl
             pkgs.sqlite
