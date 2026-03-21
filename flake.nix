@@ -32,8 +32,8 @@
             version=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
             awk -v ver="$version" -v crates="${crates}" '
               BEGIN { split(crates, c, "|"); for (i in c) names[c[i]]=1 }
-              /^name = / { name = $3; gsub(/"/, "", name); found = (name in names) }
-              found && /^version = / { $0 = "version = \"" ver "\""; found = 0 }
+              /^name = / { name = ''$3; gsub(/"/, "", name); found = (name in names) }
+              found && /^version = / { ''$0 = "version = \"" ver "\""; found = 0 }
               { print }
             ' Cargo.lock > Cargo.lock.tmp && mv Cargo.lock.tmp Cargo.lock
           '';
