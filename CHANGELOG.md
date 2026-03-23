@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.2](https://github.com/morten-olsen/grimoire/compare/v0.2.1...v0.2.2) (2026-03-23)
+
+
+### Features
+
+* **cli:** add clipboard, generate, git credential helper, and env manifest commands ([9d5d52b](https://github.com/morten-olsen/grimoire/commit/9d5d52b53c270a48588189c64bc8bb2e30b13c51))
+* **prompt:** redesign native prompts with Grimoire visual identity ([f762e27](https://github.com/morten-olsen/grimoire/commit/f762e2715f71c3c2cf7a5a7747e9bf9a1b541a34))
+* **sdk,service:** add offline vault cache with platform-bound encryption ([24537c1](https://github.com/morten-olsen/grimoire/commit/24537c1803d3ba822461abbc3e099b346c685fb7))
+
+
+### Bug Fixes
+
+* **build:** copy native prompt binaries to target/release after build ([23c726a](https://github.com/morten-olsen/grimoire/commit/23c726ac3d37b6d5e6826c82aea763fd04d66388))
+* **cli:** pass XDG_RUNTIME_DIR to launchd service plist ([7c3451c](https://github.com/morten-olsen/grimoire/commit/7c3451c443da1494e962433cf10e527123fd6710))
+* no unlock to lock and already locked vault ([66bf0bb](https://github.com/morten-olsen/grimoire/commit/66bf0bb11d2e218271613a36ce8f2e58c059819a))
+* **sdk:** fsync login state to disk after write ([6f5b83d](https://github.com/morten-olsen/grimoire/commit/6f5b83d30e53d1c84db03dfd24c1fbb946104b53))
+* **service:** handle vault unlock in grimoire approve without GUI ([52e748b](https://github.com/morten-olsen/grimoire/commit/52e748be6026584209830184d4e3677d487c7fda))
+* use GUI approval screen in auto prompt ([2d22573](https://github.com/morten-olsen/grimoire/commit/2d22573d82825ee47c1885178f43a531db9f0aa7))
+
 ## [0.2.1](https://github.com/morten-olsen/grimoire/compare/v0.2.0...v0.2.1) (2026-03-21)
 
 
