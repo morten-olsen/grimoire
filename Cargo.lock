@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-common"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs",
  "libc",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-prompt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "rpassword",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chacha20poly1305",
  "chrono",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-sdk"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1958,7 +1958,7 @@ dependencies = [
 
 [[package]]
 name = "grimoire-service"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
